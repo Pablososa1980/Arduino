@@ -23,8 +23,13 @@ Requisitos (una sola vez):
 Uso:
     python descargar_perfil_carga.py
 
-Credenciales: el usuario se configura en USUARIO (abajo). La contraseña se lee
-de la variable de entorno OPTIMUM_PASS; si no existe, se pide por consola.
+Credenciales: el usuario se configura en USUARIO (abajo). La contraseña se toma
+del Administrador de credenciales de Windows (la misma que usa el script del MDC:
+servicio "Automatismo_Telemedicion", clave "optimum"). Si todavía no existe, se
+pide una sola vez en una ventanita y queda guardada.
+Si cambiás la contraseña de Optimum, poné OLVIDAR_CLAVE = True una vez.
+
+Requiere además: pip install keyring
 
 Si algún paso falla, se guarda en la carpeta ./debug una captura (.png) y el
 HTML de la página (.html) para poder ajustar los selectores.
@@ -49,7 +54,13 @@ from playwright.sync_api import sync_playwright
 # =============================================================================
 PUNTO_DE_MEDIDA = "1234567"          # <-- poné acá el NIS a probar
 
-USUARIO = "asu06419"                 # usuario de Optimum (la contraseña se pide al ejecutar)
+USUARIO = "asu06419"                 # usuario de Optimum
+
+# Contraseña guardada en el Administrador de credenciales de Windows
+# (los mismos nombres que el script del MDC, así se comparte la credencial)
+SERVICIO_CREDENCIAL = "Automatismo_Telemedicion"
+CLAVE_CREDENCIAL = "optimum"
+OLVIDAR_CLAVE = False                # True = borra la guardada y la vuelve a pedir
 
 BASE_URL = "http://10.1.0.126/optimum"
 SERVIDOR = "LOCAL (LOCAL)"           # combo del login
@@ -186,34 +197,44 @@ def poner_fecha(page, etiqueta, valor_iso):
 # Pasos
 # -----------------------------------------------------------------------------
 def login(page, usuario, clave):
+    """Mismo método que el script del MDC (probado en el sitio real)."""
     log("1) Login")
     page.goto(f"{BASE_URL}/login.php", wait_until="domcontentloaded")
 
-    combo = page.locator("select").first
+    combo = page.locator("select:visible").first
     if combo.count():
         try:
             combo.select_option(label=SERVIDOR, timeout=3000)
         except Exception:
             pass  # suele venir preseleccionado
 
-    textos = page.locator(
-        "input:not([type=hidden]):not([type=password]):not([type=checkbox])"
-        ":not([type=submit]):not([type=button])"
-    )
-    textos.nth(0).fill(usuario)
-    page.locator("input[type=password]").first.fill(clave)
-    if textos.count() > 1:
-        textos.nth(1).fill(EMPRESA)
+    # Solo campos VISIBLES: el login tiene campos ocultos que confunden.
+    textos = page.locator('input[type="text"]:visible, input:not([type]):visible')
+    claves = page.locator('input[type="password"]:visible')
+    if textos.count() < 2 or claves.count() < 1:
+        raise RuntimeError(
+            f"No encontré los campos del login (texto={textos.count()}, password={claves.count()})"
+        )
+    textos.nth(0).fill(usuario)      # 1er campo visible = usuario
+    claves.first.fill(clave)         # contraseña
+    textos.nth(1).fill(EMPRESA)      # 2do campo visible = empresa
 
-    page.get_by_role("button", name=re.compile("Ingresar", re.I)).or_(
-        page.locator("input[type=submit][value*='Ingresar' i]")
-    ).first.click()
+    boton = page.get_by_text("Ingresar", exact=True)
+    if boton.count() == 0:
+        boton = page.locator('input[type="submit"]:visible')
+    if boton.count() == 0:
+        raise RuntimeError("No se encontró el botón Ingresar.")
+    boton.first.click()
 
     try:
-        page.wait_for_url(re.compile(r"inicio\.php"), timeout=TIMEOUT_MS)
+        page.wait_for_url(lambda url: "login.php" not in url, timeout=TIMEOUT_MS)
     except PWTimeout:
-        raise RuntimeError("El login no llegó a inicio.php (¿usuario/clave incorrectos?)")
-    log("   Login OK")
+        raise RuntimeError(
+            "Seguimos en login.php: ¿contraseña incorrecta? "
+            "Si la cambiaste, poné OLVIDAR_CLAVE = True y ejecutá de nuevo."
+        )
+    page.wait_for_load_state("domcontentloaded")
+    log(f"   Login OK ({page.url})")
 
 
 def abrir_consulta_perfil(page):
@@ -279,12 +300,31 @@ def aplicar(page):
 
 def descargar_excel(page, nis):
     log("12) Descargando Excel")
-    excel = page.locator(
-        ".buttons-excel, button:has(.fa-file-excel-o), button:has(.fa-file-excel), "
-        "a:has(.fa-file-excel-o), a:has(.fa-file-excel), i.fa-file-excel-o, i.fa-file-excel, "
-        "[title*='Excel' i], img[src*='excel' i], [onclick*='xls' i], [onclick*='excel' i]"
-    ).first
-    excel.wait_for(state="visible", timeout=TIMEOUT_MS * 2)
+    # En orden de prioridad: el primero es el que funciona en la pantalla de Medidores.
+    selectores = [
+        '[title*="Exportar"]:visible',
+        'a:has(img[src*="xls" i]):visible',
+        'a:has(img[src*="excel" i]):visible',
+        '[title*="Excel" i]:visible',
+        '.buttons-excel:visible',
+        'a:has(.fa-file-excel-o):visible, a:has(.fa-file-excel):visible, '
+        'button:has(.fa-file-excel-o):visible, button:has(.fa-file-excel):visible',
+        'img[src*="xls" i]:visible, img[src*="excel" i]:visible',
+        '[onclick*="xls" i]:visible, [onclick*="excel" i]:visible',
+    ]
+    excel = None
+    limite = time.time() + TIMEOUT_MS * 2 / 1000   # la tabla puede tardar en cargar
+    while excel is None and time.time() < limite:
+        for css in selectores:
+            loc = page.locator(css)
+            if loc.count():
+                excel = loc.first
+                log(f"   Botón Excel encontrado con: {css}")
+                break
+        else:
+            time.sleep(1)
+    if excel is None:
+        raise RuntimeError("No encontré el botón de Exportar / Excel.")
 
     with page.expect_download(timeout=TIMEOUT_MS * 4) as info:
         excel.click()
@@ -394,9 +434,69 @@ def descargar_perfil(nis, usuario, clave):
             navegador.close()
 
 
+def pedir_clave_ventana():
+    """Ventanita Tkinter para la contraseña (igual que el script del MDC)."""
+    import tkinter as tk
+    from tkinter import simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    clave = simpledialog.askstring(
+        "Perfil de Carga - optimum.SM",
+        f"Usuario: {USUARIO}\n\nIngrese su contraseña:\n\n"
+        "Se guardará en el Administrador de credenciales de Windows "
+        "para las próximas ejecuciones.",
+        show="*",
+        parent=root,
+    )
+    root.destroy()
+    return clave
+
+
+def obtener_clave():
+    """Variable OPTIMUM_PASS -> Credential Manager -> ventanita (y se guarda)."""
+    if os.environ.get("OPTIMUM_PASS"):
+        return os.environ["OPTIMUM_PASS"]
+
+    try:
+        import keyring
+    except ImportError:
+        keyring = None
+        log("Aviso: falta 'keyring' (pip install keyring); la contraseña no se guardará.")
+
+    if keyring and OLVIDAR_CLAVE:
+        try:
+            keyring.delete_password(SERVICIO_CREDENCIAL, CLAVE_CREDENCIAL)
+            log("Credencial anterior borrada. Volvé a poner OLVIDAR_CLAVE = False.")
+        except Exception:
+            pass
+
+    if keyring:
+        clave = keyring.get_password(SERVICIO_CREDENCIAL, CLAVE_CREDENCIAL)
+        if clave:
+            log("✅ Contraseña recuperada del Administrador de credenciales de Windows.")
+            return clave
+
+    try:
+        clave = pedir_clave_ventana()
+    except Exception:  # sin entorno gráfico
+        clave = getpass.getpass("Contraseña Optimum: ")
+    if not clave:
+        raise SystemExit("❌ Operación cancelada: no se ingresó contraseña.")
+
+    if keyring:
+        keyring.set_password(SERVICIO_CREDENCIAL, CLAVE_CREDENCIAL, clave)
+        log("✅ Contraseña guardada en el Administrador de credenciales de Windows.")
+    return clave
+
+
 def main():
     usuario = USUARIO
-    clave = os.environ.get("OPTIMUM_PASS") or getpass.getpass("Contraseña Optimum: ")
+    clave = obtener_clave()
     nis = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else PUNTO_DE_MEDIDA
     log(f"Iniciando descarga para el Punto de Medida {nis}")
     archivo = ejecutar_en_hilo(descargar_perfil, nis, usuario, clave)
