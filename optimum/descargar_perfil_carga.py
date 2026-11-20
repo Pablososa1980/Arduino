@@ -52,7 +52,8 @@ from playwright.sync_api import sync_playwright
 # =============================================================================
 # CONFIGURACIÓN — editá esto
 # =============================================================================
-PUNTO_DE_MEDIDA = "1234567"          # <-- poné acá el NIS a probar
+PUNTO_DE_MEDIDA = "1379190"          # NIS del suministro (factor y potencia: ver analisis_perfil.py)
+ANALIZAR_AL_DESCARGAR = True         # genera la página web y revisa alertas al terminar
 
 USUARIO = "asu06419"                 # usuario de Optimum
 
@@ -717,6 +718,11 @@ def main():
     log(f"Iniciando descarga para el Punto de Medida {nis}")
     archivo = ejecutar_en_hilo(descargar_perfil, nis, usuario, clave)
     log(f"Listo: {archivo}")
+
+    if ANALIZAR_AL_DESCARGAR:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import analisis_perfil
+        analisis_perfil.procesar(archivo, nis)
 
 
 if __name__ == "__main__":
