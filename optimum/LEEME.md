@@ -42,7 +42,12 @@ Todos los días, en tu PC (con acceso a la red de ANDE):
    ```
    Al terminar debería verse en `https://tudominio.com/potencia/`.
 
-6. **Programar la tarea:** doble clic en `crear_tarea_programada.bat`. Corre todos los días a las 07:15; la hora se cambia dentro del archivo.
+6. **Programar la tarea:**
+   ```
+   python orquestador_diario.py --crear-tarea
+   ```
+   Genera `ejecutar_orquestador.bat` con tu Python y crea la tarea diaria a las 07:15. Para otra hora: `--crear-tarea 06:30`. Desde la consola de Spyder: `%run orquestador_diario.py --crear-tarea`.
+   (Si pudiste bajar `crear_tarea_programada.bat`, el doble clic hace lo mismo.)
 
 ## Cosas a saber
 

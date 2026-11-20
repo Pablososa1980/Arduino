@@ -19,6 +19,10 @@ Otras opciones útiles para probar:
     python orquestador_diario.py --sin-subir      # todo menos subir a Hostinger
     python orquestador_diario.py --sin-descargar  # usa el último Excel ya bajado
     python orquestador_diario.py --solo-subir     # sube lo que ya está en reportes/web
+
+Tarea programada (crea el .bat y la tarea de Windows, no hace falta descargarlos):
+    python orquestador_diario.py --crear-tarea          # todos los días 07:15
+    python orquestador_diario.py --crear-tarea 06:30    # otra hora
 """
 
 import argparse
@@ -28,6 +32,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -154,6 +159,49 @@ def configurar():
     with conectar_ftp() as ftp:
         ir_a_carpeta(ftp, HOSTINGER["carpeta_remota"], crear=True)
         log(f"✅ Conexión OK. Carpeta remota: /{HOSTINGER['carpeta_remota']}")
+
+
+# -----------------------------------------------------------------------------
+# Tarea programada de Windows (sin tener que descargar archivos .bat)
+# -----------------------------------------------------------------------------
+NOMBRE_TAREA = "Optimum - Perfil de Carga diario"
+
+
+def crear_tarea(hora="07:15"):
+    """Escribe ejecutar_orquestador.bat (con el Python que estás usando) y crea la tarea diaria."""
+    if not sys.platform.startswith("win"):
+        raise SystemExit("La tarea programada solo se puede crear en Windows.")
+    python = Path(sys.executable)
+    if python.name.lower() == "pythonw.exe":
+        python = python.with_name("python.exe")
+    prefijo = Path(sys.prefix)
+    activar = prefijo / "Scripts" / "activate.bat"
+    lineas = [
+        "@echo off",
+        "REM Generado por orquestador_diario.py --crear-tarea",
+        'cd /d "%~dp0"',
+        "if not exist logs mkdir logs",
+    ]
+    if activar.exists():   # Anaconda: activar el entorno para que encuentre sus DLL
+        lineas.append(f'call "{activar}" "{prefijo}"')
+    lineas += [
+        f'"{python}" orquestador_diario.py %* >> "logs\\tarea_programada.log" 2>&1',
+        "exit /b %ERRORLEVEL%",
+    ]
+    bat = CARPETA / "ejecutar_orquestador.bat"
+    # cmd.exe lee los .bat con la página de códigos OEM (rutas con tildes/ñ incluidas)
+    bat.write_text("\r\n".join(lineas) + "\r\n", encoding="oem", errors="replace")
+    log(f"✅ Creado {bat}")
+
+    comando = ["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", hora,
+               "/TN", NOMBRE_TAREA, "/TR", f'"{bat}"']
+    r = subprocess.run(comando, capture_output=True, text=True)
+    salida = (r.stdout or "") + (r.stderr or "")
+    if r.returncode != 0:
+        raise RuntimeError(f"schtasks no pudo crear la tarea:\n{salida.strip()}")
+    log(f"✅ Tarea '{NOMBRE_TAREA}' creada: todos los días a las {hora}.")
+    log(f'   Probarla ahora:  schtasks /Run /TN "{NOMBRE_TAREA}"')
+    log("   Verla o editarla: Programador de tareas de Windows (Biblioteca del Programador de tareas).")
 
 
 # -----------------------------------------------------------------------------
@@ -332,6 +380,8 @@ def main():
     parser.add_argument("--sin-subir", action="store_true", help="no subir a Hostinger")
     parser.add_argument("--sin-descargar", action="store_true", help="usar el último Excel ya descargado")
     parser.add_argument("--solo-subir", action="store_true", help="solo subir reportes/web")
+    parser.add_argument("--crear-tarea", nargs="?", const="07:15", metavar="HH:MM",
+                        help="crear la tarea diaria en Windows (por defecto a las 07:15)")
     args = parser.parse_args()
 
     archivo_log = iniciar_log()
@@ -340,6 +390,9 @@ def main():
     try:
         if args.configurar:
             configurar()
+            return 0
+        if args.crear_tarea:
+            crear_tarea(args.crear_tarea)
             return 0
         if args.solo_subir:
             subir_carpeta(CARPETA_WEB, HOSTINGER["carpeta_remota"])
