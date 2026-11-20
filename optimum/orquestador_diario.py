@@ -69,6 +69,11 @@ GUARDAR_LOGS_DIAS = 60
 NOMBRE_TAREA = "Optimum - Perfil de Carga diario"
 # =============================================================================
 
+# Corrida a mano (botón Ejecutar del editor o consola): si falta el token o la
+# contraseña, se piden en una ventanita. La tarea programada usa --auto y nunca
+# pregunta nada (si falta algo, deja el error en el log y termina).
+MODO_INTERACTIVO = True
+
 
 # -----------------------------------------------------------------------------
 # Registro (pantalla + archivo)
@@ -129,14 +134,36 @@ def token_api(interactivo=False):
     token = kr.get_password(WEB["servicio_credencial"], WEB["clave_credencial"])
     if token:
         return token
-    if not interactivo:
+    if not (interactivo or MODO_INTERACTIVO):
         raise RuntimeError("No hay token de la API guardado. Ejecutá: python orquestador_diario.py --configurar")
-    token = getpass.getpass("Pegá el token de la API (panel > Tokens) y Enter: ").strip()
+    token = (pedir_token_ventana() or "").strip()
     if not token:
         raise SystemExit("Cancelado.")
     kr.set_password(WEB["servicio_credencial"], WEB["clave_credencial"], token)
     log("✅ Token guardado en el Administrador de credenciales de Windows.")
     return token
+
+
+def pedir_token_ventana():
+    """Ventanita para pegar el token (si no hay entorno gráfico, lo pide por consola)."""
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        token = simpledialog.askstring(
+            "Panel de Potencia - token de la API",
+            "Pegá el token que generaste en el panel\n(menú Tokens > Generar token).\n\n"
+            "Se guarda en el Administrador de credenciales de Windows\ny no se vuelve a pedir.",
+            show="*", parent=root)
+        root.destroy()
+        return token
+    except Exception:
+        return getpass.getpass("Pegá el token de la API (panel > Tokens) y Enter: ")
 
 
 def configurar():
@@ -303,7 +330,7 @@ def correr(descargar_datos=True, subir=True, mes=None, solo_nis=None):
     log(f"Suministros a procesar: {', '.join(s['nis'] for s in suministros) or 'ninguno'}")
 
     usuario = dp.USUARIO
-    clave = dp.obtener_clave(interactivo=False) if descargar_datos else None
+    clave = dp.obtener_clave(interactivo=MODO_INTERACTIVO) if descargar_datos else None
 
     # Qué períodos bajar
     if mes:
@@ -367,7 +394,7 @@ def crear_tarea(hora="07:15"):
               'cd /d "%~dp0"', "if not exist logs mkdir logs"]
     if activar.exists():   # Anaconda: activar el entorno para que encuentre sus DLL
         lineas.append(f'call "{activar}" "{prefijo}"')
-    lineas += [f'"{python}" orquestador_diario.py %* >> "logs\\tarea_programada.log" 2>&1',
+    lineas += [f'"{python}" orquestador_diario.py --auto %* >> "logs\\tarea_programada.log" 2>&1',
                "exit /b %ERRORLEVEL%"]
     bat = CARPETA / "ejecutar_orquestador.bat"
     # cmd.exe lee los .bat con la página de códigos OEM (rutas con tildes/ñ incluidas)
@@ -390,9 +417,15 @@ def main():
     parser.add_argument("--mes", metavar="AAAA-MM", help="cargar un mes pasado completo (histórico)")
     parser.add_argument("--nis", help="procesar solo este suministro")
     parser.add_argument("--archivo", help="enviar un Excel descargado a mano (requiere --nis)")
+    parser.add_argument("--auto", action="store_true",
+                        help="modo tarea programada: nunca abre ventanas ni pregunta nada")
     parser.add_argument("--crear-tarea", nargs="?", const="07:15", metavar="HH:MM",
                         help="crear la tarea diaria en Windows (por defecto 07:15)")
     args = parser.parse_args()
+    global MODO_INTERACTIVO, VENTANA_ALERTA_AL_FINAL
+    if args.auto:
+        MODO_INTERACTIVO = False
+        VENTANA_ALERTA_AL_FINAL = False   # nadie está mirando: las alertas van por correo desde el panel
 
     archivo_log = iniciar_log()
     inicio = time.time()
