@@ -103,21 +103,68 @@ def guardar_debug(page, nombre):
         log(f"   Debug guardado: {png.name} / {html.name}")
     except Exception as e:  # noqa: BLE001
         log(f"   No se pudo guardar debug: {e}")
+    try:
+        log("   ---- Controles del formulario (pasame esto si falla) ----")
+        controles = page.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('select, input, textarea, button').forEach(el => {
+                if (el.type === 'hidden') return;
+                const vis = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                const grupo = el.closest('.form-group, .col, [class*="col-"], td, div');
+                const etq = el.id && document.querySelector(`label[for="${el.id}"]`);
+                const texto = (etq ? etq.innerText : (grupo ? grupo.innerText : '')).trim()
+                                .split('\\n')[0].slice(0, 40);
+                let det = `${el.tagName.toLowerCase()} id=${el.id || '-'} name=${el.name || '-'}`
+                        + ` class=${(el.className || '-').toString().slice(0, 40)}`
+                        + ` visible=${vis} etiqueta="${texto}"`;
+                if (el.tagName === 'SELECT') {
+                    det += ' opciones=' + JSON.stringify([...el.options].slice(0, 12).map(o => o.text.trim()));
+                } else if (el.tagName === 'INPUT') {
+                    det += ` type=${el.type} value="${(el.value || '').slice(0, 30)}"`;
+                } else {
+                    det += ` texto="${(el.innerText || el.value || '').trim().slice(0, 30)}"`;
+                }
+                out.push(det);
+            });
+            return out;
+        }""")
+        for c in controles:
+            log("   " + c)
+    except Exception as e:  # noqa: BLE001
+        log(f"   No se pudo guardar debug: {e}")
 
 
 # -----------------------------------------------------------------------------
 # Localizadores por texto de etiqueta (no dependemos de ids que no conocemos)
 # -----------------------------------------------------------------------------
 def _xpath_etiqueta(texto):
-    """Elemento cuyo texto propio empieza con `texto` (label, span, div, td...)."""
+    """
+    Elemento (de cualquier tipo: label, p, h5, span...) cuyo texto propio empieza
+    con `texto`. Se excluyen opciones de combos y el texto que dibujan los
+    widgets select2 (p. ej. el "Punto de Medida" ya elegido en Dispositivo).
+    """
     return (
-        "//*[self::label or self::span or self::div or self::td or self::th or self::b or self::strong]"
-        f"[starts-with(normalize-space(text()), '{texto}')]"
+        "//*[not(self::option) and not(self::select) and not(self::script) and not(self::style)"
+        " and not(self::button) and not(self::a)"
+        " and not(ancestor-or-self::*[contains(@class,'select2')])]"
+        f"[text()[starts-with(normalize-space(.), '{texto}')]]"
     )
 
 
 def control_despues_de(page, etiqueta, tag="select"):
     """Primer <select>/<input> que aparece después de la etiqueta visible."""
+    # a) <label for="id"> bien armado -> lo más confiable
+    for_ids = page.evaluate(
+        """(t) => [...document.querySelectorAll('label[for]')]
+                .filter(l => l.innerText.trim().toLowerCase().startsWith(t.toLowerCase()))
+                .map(l => l.htmlFor)""",
+        etiqueta,
+    )
+    for fid in for_ids:
+        loc = page.locator(f'{tag}[id="{fid}"]')
+        if loc.count():
+            return loc.first
+    # b) el primer control que aparece después del texto de la etiqueta
     etiquetas = page.locator(f"xpath={_xpath_etiqueta(etiqueta)}")
     etiquetas.first.wait_for(state="attached", timeout=TIMEOUT_MS)
     elegida = etiquetas.first
@@ -135,15 +182,21 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
     Funciona aunque el select esté oculto por un plugin (select2/chosen/bootstrap-select).
     """
     sel = control_despues_de(page, etiqueta, "select")
+    sel.wait_for(state="attached", timeout=TIMEOUT_MS)
     objetivo = normalizar(texto)
+    ident = sel.evaluate("el => `${el.id || '-'} / ${el.name || '-'}`")
+
+    def opciones():
+        # textContent funciona aunque el select esté oculto (select2)
+        return sel.evaluate("el => [...el.options].map(o => [o.value, o.textContent.trim()])")
 
     def buscar():
-        for op in sel.locator("option").all():
-            t = normalizar(op.inner_text())
-            if (modo == "exacto" and t == objetivo) or \
-               (modo == "empieza" and t.startswith(objetivo)) or \
-               (modo == "contiene" and objetivo in t):
-                return op.evaluate("o => o.value"), op.inner_text().strip()
+        for v, t in opciones():
+            n = normalizar(t)
+            if (modo == "exacto" and n == objetivo) or \
+               (modo == "empieza" and n.startswith(objetivo)) or \
+               (modo == "contiene" and objetivo in n):
+                return v, t
         return None, None
 
     # Las opciones pueden cargarse por AJAX: reintentamos hasta TIMEOUT_MS.
@@ -153,8 +206,8 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
         time.sleep(0.5)
         valor, visible = buscar()
     if valor is None:
-        opciones = [o.inner_text().strip() for o in sel.locator("option").all()]
-        raise RuntimeError(f"No encontré '{texto}' en '{etiqueta}'. Opciones: {opciones}")
+        lista = [t for _, t in opciones()]
+        raise RuntimeError(f"No encontré '{texto}' en '{etiqueta}' (select {ident}). Opciones: {lista}")
 
     try:
         sel.select_option(value=valor, timeout=3000)
@@ -254,14 +307,23 @@ def clientes_todos(page):
     icono.click()
     page.wait_for_timeout(LENTITUD_MS * 4)
 
-    inp = control_despues_de(page, "Clientes", "input")
-    if "todos" not in normalizar(inp.input_value()):
-        # Algunos sistemas abren un menú/modal con la opción "Todos"
-        opcion = page.get_by_text(re.compile(r"^\s*Todos\s*$", re.I)).first
-        if opcion.count() and opcion.is_visible():
-            opcion.click()
-            page.wait_for_timeout(LENTITUD_MS * 3)
-    log(f"   Clientes: {inp.input_value() or '(vacío?)'}")
+    # El campo es un select2: al elegir "Todos" aparece la etiqueta "×Todos".
+    chip = page.locator(".select2-selection__choice:visible, .select2-search-choice:visible")
+    if chip.filter(has_text=re.compile("Todos", re.I)).count():
+        log("   Clientes: Todos")
+        return
+    try:
+        inp = control_despues_de(page, "Clientes", "input")
+        if "todos" in normalizar(inp.input_value()):
+            log("   Clientes: Todos")
+            return
+    except Exception:
+        pass
+    opcion = page.get_by_text(re.compile(r"^\s*Todos\s*$", re.I)).first
+    if opcion.count() and opcion.is_visible():
+        opcion.click()
+        page.wait_for_timeout(LENTITUD_MS * 3)
+    log("   Clientes: (no pude confirmar 'Todos', sigo igual)")
 
 
 def ingresar_nis(page, nis):
@@ -273,15 +335,18 @@ def ingresar_nis(page, nis):
 
     # Si aparece una lista de sugerencias, elegimos la que contiene el NIS.
     sugerencias = page.locator(
+        ".select2-results__option:not(.select2-results__message):not(.loading-results):visible, "
+        ".select2-results li.select2-result-selectable:visible, "
         ".ui-autocomplete li:visible, .tt-menu .tt-suggestion:visible, "
         ".typeahead li:visible, .autocomplete-suggestion:visible, "
-        ".select2-results li:visible, .easy-autocomplete-container li:visible"
-    )
+        ".easy-autocomplete-container li:visible"
+    ).filter(has_text=str(nis))
     try:
-        sugerencias.first.wait_for(state="visible", timeout=4000)
-        objetivo = sugerencias.filter(has_text=str(nis)).first
-        (objetivo if objetivo.count() else sugerencias.first).click()
+        sugerencias.first.wait_for(state="visible", timeout=10_000)
+        log(f"   Sugerencia: {sugerencias.first.inner_text().strip()}")
+        sugerencias.first.click()
     except PWTimeout:
+        log("   No apareció lista de sugerencias; confirmo con Enter")
         inp.press("Enter")
         inp.press("Tab")
     page.wait_for_timeout(LENTITUD_MS * 4)
@@ -289,10 +354,18 @@ def ingresar_nis(page, nis):
 
 def aplicar(page):
     log("11) Aplicar")
-    boton = page.get_by_role("button", name=re.compile(r"Aplicar|Graficar", re.I)).or_(
-        page.locator("input[type=submit][value*='Aplicar' i], input[type=button][value*='Aplicar' i], "
-                     "a:has-text('Aplicar')")
-    ).first
+    boton = None
+    for nombre in ("Aplicar", "Graficar"):
+        cand = page.locator(
+            f"button:visible:has-text('{nombre}'), a:visible:has-text('{nombre}'), "
+            f"input[type=submit][value*='{nombre}' i]:visible, input[type=button][value*='{nombre}' i]:visible"
+        )
+        if cand.count():
+            boton = cand.first
+            break
+    if boton is None:
+        raise RuntimeError("No encontré el botón Aplicar / Graficar.")
+    log(f"   Botón: {boton.inner_text().strip() or boton.get_attribute('value')}")
     boton.click()
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1500)
