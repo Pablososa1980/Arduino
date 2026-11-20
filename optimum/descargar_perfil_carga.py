@@ -1,0 +1,353 @@
+"""
+Descarga automática del Perfil de Carga (Excel) desde Optimum.SM (ANDE).
+
+Flujo que replica:
+  1. Login en http://10.1.0.126/optimum/login.php
+  2. C&I > Perfil de Carga > Consulta Perfil (perfilGrafico.php?m=2)
+  3. Clientes: clic en el ícono del grupito -> "Todos"
+  4. Dispositivo: "Punto de Medida"
+  5. Fecha desde: 1er día del mes actual / Fecha hasta: hoy
+  6. Tipo: "Tabla"
+  7. Punto de Medida: NIS
+  8. Medidor: el que empieza con "EGM"
+  9. Log: "Todos"
+ 10. Canal: "Sum Li Active Power + (QI+QIV) (last average 1)- 0 x"
+ 11. Aplicar -> ícono de Excel -> descarga
+
+Requisitos (una sola vez):
+    pip install playwright
+    # Si usás el Chrome ya instalado (NAVEGADOR = "chrome") no hace falta nada más.
+    # Si no tenés Chrome, usá NAVEGADOR = None y ejecutá:
+    #   playwright install chromium
+
+Uso:
+    python descargar_perfil_carga.py
+
+Credenciales: se leen de las variables de entorno OPTIMUM_USER / OPTIMUM_PASS.
+Si no existen, el script te las pide por consola (la contraseña no se muestra).
+
+Si algún paso falla, se guarda en la carpeta ./debug una captura (.png) y el
+HTML de la página (.html) para poder ajustar los selectores.
+"""
+
+import getpass
+import os
+import re
+import sys
+import time
+from datetime import date
+from pathlib import Path
+
+from playwright.sync_api import TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
+
+# =============================================================================
+# CONFIGURACIÓN — editá esto
+# =============================================================================
+PUNTO_DE_MEDIDA = "1234567"          # <-- poné acá el NIS a probar
+
+BASE_URL = "http://10.1.0.126/optimum"
+SERVIDOR = "LOCAL (LOCAL)"           # combo del login
+EMPRESA = "ANDE"                     # último campo del login
+
+DISPOSITIVO = "Punto de Medida"
+TIPO = "Tabla"
+MEDIDOR_PREFIJO = "EGM"
+LOG = "Todos"
+CANAL = "Sum Li Active Power + (QI+QIV) (last average 1)- 0 x"
+
+CARPETA_DESCARGAS = Path(__file__).resolve().parent / "descargas"
+CARPETA_DEBUG = Path(__file__).resolve().parent / "debug"
+
+NAVEGADOR = "chrome"   # "chrome" usa el Chrome instalado; "msedge" para Edge; None = Chromium de Playwright
+HEADLESS = False       # False = ves el navegador mientras trabaja (ideal para probar)
+LENTITUD_MS = 150      # pausa entre acciones (ms); subilo si la página es lenta
+TIMEOUT_MS = 30_000    # espera máxima por elemento
+# =============================================================================
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def normalizar(texto):
+    """Minúsculas y espacios colapsados, para comparar textos de opciones."""
+    return re.sub(r"\s+", " ", (texto or "")).strip().lower()
+
+
+def guardar_debug(page, nombre):
+    CARPETA_DEBUG.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    png = CARPETA_DEBUG / f"{stamp}_{nombre}.png"
+    html = CARPETA_DEBUG / f"{stamp}_{nombre}.html"
+    try:
+        page.screenshot(path=str(png), full_page=True)
+        html.write_text(page.content(), encoding="utf-8")
+        log(f"   Debug guardado: {png.name} / {html.name}")
+    except Exception as e:  # noqa: BLE001
+        log(f"   No se pudo guardar debug: {e}")
+
+
+# -----------------------------------------------------------------------------
+# Localizadores por texto de etiqueta (no dependemos de ids que no conocemos)
+# -----------------------------------------------------------------------------
+def _xpath_etiqueta(texto):
+    """Elemento cuyo texto propio empieza con `texto` (label, span, div, td...)."""
+    return (
+        "//*[self::label or self::span or self::div or self::td or self::th or self::b or self::strong]"
+        f"[starts-with(normalize-space(text()), '{texto}')]"
+    )
+
+
+def control_despues_de(page, etiqueta, tag="select"):
+    """Primer <select>/<input> que aparece después de la etiqueta visible."""
+    etiquetas = page.locator(f"xpath={_xpath_etiqueta(etiqueta)}")
+    etiquetas.first.wait_for(state="attached", timeout=TIMEOUT_MS)
+    elegida = etiquetas.first
+    for i in range(etiquetas.count()):
+        if etiquetas.nth(i).is_visible():
+            elegida = etiquetas.nth(i)
+            break
+    return elegida.locator(f"xpath=following::{tag}[1]")
+
+
+def seleccionar(page, etiqueta, texto, modo="exacto"):
+    """
+    Selecciona una opción de un <select> ubicado tras `etiqueta`.
+    modo: "exacto" | "empieza" | "contiene"
+    Funciona aunque el select esté oculto por un plugin (select2/chosen/bootstrap-select).
+    """
+    sel = control_despues_de(page, etiqueta, "select")
+    objetivo = normalizar(texto)
+
+    def buscar():
+        for op in sel.locator("option").all():
+            t = normalizar(op.inner_text())
+            if (modo == "exacto" and t == objetivo) or \
+               (modo == "empieza" and t.startswith(objetivo)) or \
+               (modo == "contiene" and objetivo in t):
+                return op.evaluate("o => o.value"), op.inner_text().strip()
+        return None, None
+
+    # Las opciones pueden cargarse por AJAX: reintentamos hasta TIMEOUT_MS.
+    limite = time.time() + TIMEOUT_MS / 1000
+    valor, visible = buscar()
+    while valor is None and time.time() < limite:
+        time.sleep(0.5)
+        valor, visible = buscar()
+    if valor is None:
+        opciones = [o.inner_text().strip() for o in sel.locator("option").all()]
+        raise RuntimeError(f"No encontré '{texto}' en '{etiqueta}'. Opciones: {opciones}")
+
+    try:
+        sel.select_option(value=valor, timeout=3000)
+    except Exception:  # select oculto por un plugin -> lo forzamos por JS
+        sel.evaluate(
+            """(el, v) => {
+                el.value = v;
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                if (window.jQuery) { window.jQuery(el).val(v).trigger('change'); }
+            }""",
+            valor,
+        )
+    log(f"   {etiqueta}: {visible}")
+    page.wait_for_timeout(LENTITUD_MS * 3)
+
+
+def poner_fecha(page, etiqueta, valor_iso):
+    """Escribe una fecha YYYY-MM-DD (aunque el input sea readonly / datepicker)."""
+    inp = control_despues_de(page, etiqueta, "input")
+    inp.evaluate(
+        """(el, v) => {
+            el.removeAttribute('readonly');
+            el.value = v;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            if (window.jQuery) {
+                const $el = window.jQuery(el);
+                try { if ($el.datepicker) $el.datepicker('update', v); } catch (e) {}
+                $el.val(v).trigger('change');
+            }
+        }""",
+        valor_iso,
+    )
+    page.keyboard.press("Escape")  # cierra el calendario si se abrió
+    log(f"   {etiqueta}: {valor_iso}")
+
+
+# -----------------------------------------------------------------------------
+# Pasos
+# -----------------------------------------------------------------------------
+def login(page, usuario, clave):
+    log("1) Login")
+    page.goto(f"{BASE_URL}/login.php", wait_until="domcontentloaded")
+
+    combo = page.locator("select").first
+    if combo.count():
+        try:
+            combo.select_option(label=SERVIDOR, timeout=3000)
+        except Exception:
+            pass  # suele venir preseleccionado
+
+    textos = page.locator(
+        "input:not([type=hidden]):not([type=password]):not([type=checkbox])"
+        ":not([type=submit]):not([type=button])"
+    )
+    textos.nth(0).fill(usuario)
+    page.locator("input[type=password]").first.fill(clave)
+    if textos.count() > 1:
+        textos.nth(1).fill(EMPRESA)
+
+    page.get_by_role("button", name=re.compile("Ingresar", re.I)).or_(
+        page.locator("input[type=submit][value*='Ingresar' i]")
+    ).first.click()
+
+    try:
+        page.wait_for_url(re.compile(r"inicio\.php"), timeout=TIMEOUT_MS)
+    except PWTimeout:
+        raise RuntimeError("El login no llegó a inicio.php (¿usuario/clave incorrectos?)")
+    log("   Login OK")
+
+
+def abrir_consulta_perfil(page):
+    log("2) Abriendo Consulta Perfil")
+    page.goto(f"{BASE_URL}/perfilGrafico.php?m=2", wait_until="domcontentloaded")
+    page.wait_for_load_state("networkidle")
+
+
+def clientes_todos(page):
+    log("3) Clientes -> Todos")
+    etq = page.locator(f"xpath={_xpath_etiqueta('Clientes')}").first
+    icono = etq.locator(
+        "xpath=.//i | following-sibling::i[1] | .//span[contains(@class,'fa')]"
+    ).first
+    if not icono.count():
+        icono = page.locator("i.fa-users, i.fa-group, .fa-users, .fa-group").first
+    icono.click()
+    page.wait_for_timeout(LENTITUD_MS * 4)
+
+    inp = control_despues_de(page, "Clientes", "input")
+    if "todos" not in normalizar(inp.input_value()):
+        # Algunos sistemas abren un menú/modal con la opción "Todos"
+        opcion = page.get_by_text(re.compile(r"^\s*Todos\s*$", re.I)).first
+        if opcion.count() and opcion.is_visible():
+            opcion.click()
+            page.wait_for_timeout(LENTITUD_MS * 3)
+    log(f"   Clientes: {inp.input_value() or '(vacío?)'}")
+
+
+def ingresar_nis(page, nis):
+    log(f"7) Punto de Medida: {nis}")
+    inp = control_despues_de(page, "Punto de", "input")
+    inp.click()
+    inp.fill("")
+    inp.type(str(nis), delay=80)  # tipeo lento para disparar el autocompletado
+
+    # Si aparece una lista de sugerencias, elegimos la que contiene el NIS.
+    sugerencias = page.locator(
+        ".ui-autocomplete li:visible, .tt-menu .tt-suggestion:visible, "
+        ".typeahead li:visible, .autocomplete-suggestion:visible, "
+        ".select2-results li:visible, .easy-autocomplete-container li:visible"
+    )
+    try:
+        sugerencias.first.wait_for(state="visible", timeout=4000)
+        objetivo = sugerencias.filter(has_text=str(nis)).first
+        (objetivo if objetivo.count() else sugerencias.first).click()
+    except PWTimeout:
+        inp.press("Enter")
+        inp.press("Tab")
+    page.wait_for_timeout(LENTITUD_MS * 4)
+
+
+def aplicar(page):
+    log("11) Aplicar")
+    boton = page.get_by_role("button", name=re.compile(r"Aplicar|Graficar", re.I)).or_(
+        page.locator("input[type=submit][value*='Aplicar' i], input[type=button][value*='Aplicar' i], "
+                     "a:has-text('Aplicar')")
+    ).first
+    boton.click()
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1500)
+
+
+def descargar_excel(page, nis):
+    log("12) Descargando Excel")
+    excel = page.locator(
+        ".buttons-excel, button:has(.fa-file-excel-o), button:has(.fa-file-excel), "
+        "a:has(.fa-file-excel-o), a:has(.fa-file-excel), i.fa-file-excel-o, i.fa-file-excel, "
+        "[title*='Excel' i], img[src*='excel' i], [onclick*='xls' i], [onclick*='excel' i]"
+    ).first
+    excel.wait_for(state="visible", timeout=TIMEOUT_MS * 2)
+
+    with page.expect_download(timeout=TIMEOUT_MS * 4) as info:
+        excel.click()
+    descarga = info.value
+
+    CARPETA_DESCARGAS.mkdir(parents=True, exist_ok=True)
+    original = descarga.suggested_filename or "perfil.xlsx"
+    extension = Path(original).suffix or ".xlsx"
+    destino = CARPETA_DESCARGAS / f"perfil_{nis}_{date.today():%Y%m%d}{extension}"
+    descarga.save_as(str(destino))
+    log(f"   Guardado en: {destino}")
+    return destino
+
+
+def descargar_perfil(nis, usuario, clave):
+    hoy = date.today()
+    desde = hoy.replace(day=1).isoformat()
+    hasta = hoy.isoformat()
+
+    with sync_playwright() as p:
+        opciones = {"headless": HEADLESS, "slow_mo": LENTITUD_MS}
+        if NAVEGADOR:
+            opciones["channel"] = NAVEGADOR
+        navegador = p.chromium.launch(**opciones)
+        contexto = navegador.new_context(accept_downloads=True, viewport={"width": 1600, "height": 900})
+        page = contexto.new_page()
+        page.set_default_timeout(TIMEOUT_MS)
+
+        paso = "inicio"
+        try:
+            paso = "login";            login(page, usuario, clave)
+            paso = "consulta_perfil";  abrir_consulta_perfil(page)
+            paso = "clientes";         clientes_todos(page)
+            paso = "dispositivo"
+            log("4) Dispositivo");     seleccionar(page, "Dispositivo", DISPOSITIVO)
+            paso = "fechas"
+            log("5) Fechas")
+            poner_fecha(page, "Fecha desde", desde)
+            poner_fecha(page, "Fecha hasta", hasta)
+            paso = "tipo"
+            log("6) Tipo");            seleccionar(page, "Tipo", TIPO)
+            paso = "nis";              ingresar_nis(page, nis)
+            paso = "medidor"
+            log("8) Medidor");         seleccionar(page, "Medidor", MEDIDOR_PREFIJO, modo="empieza")
+            paso = "log"
+            log("9) Log");             seleccionar(page, "Log", LOG)
+            paso = "canal"
+            log("10) Canal");          seleccionar(page, "Canal", CANAL, modo="contiene")
+            paso = "aplicar";          aplicar(page)
+            paso = "excel";            archivo = descargar_excel(page, nis)
+            return archivo
+        except Exception as e:
+            log(f"ERROR en el paso '{paso}': {e}")
+            guardar_debug(page, paso)
+            if not HEADLESS:
+                input("Revisá el navegador. Presioná Enter para cerrar...")
+            raise
+        finally:
+            contexto.close()
+            navegador.close()
+
+
+def main():
+    usuario = os.environ.get("OPTIMUM_USER") or input("Usuario Optimum: ").strip()
+    clave = os.environ.get("OPTIMUM_PASS") or getpass.getpass("Contraseña Optimum: ")
+    nis = sys.argv[1] if len(sys.argv) > 1 else PUNTO_DE_MEDIDA
+    archivo = descargar_perfil(nis, usuario, clave)
+    log(f"Listo: {archivo}")
+
+
+if __name__ == "__main__":
+    main()
