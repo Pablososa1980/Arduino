@@ -29,6 +29,7 @@ Otras opciones:
 
 import argparse
 import calendar
+import re
 import getpass
 import io
 import json
@@ -136,9 +137,14 @@ def token_api(interactivo=False):
         return token
     if not (interactivo or MODO_INTERACTIVO):
         raise RuntimeError("No hay token de la API guardado. Ejecutá: python orquestador_diario.py --configurar")
-    token = (pedir_token_ventana() or "").strip()
+    crudo = pedir_token_ventana() or ""
+    # El token solo tiene letras, números, "-" y "_": se descarta todo lo demás
+    # (espacios, saltos de línea o el carácter invisible que deja un Ctrl+V fallido).
+    token = re.sub(r"[^A-Za-z0-9_-]", "", crudo)
     if not token:
-        raise SystemExit("Cancelado.")
+        raise SystemExit("Cancelado: no se recibió ningún token.")
+    log(f"   Token recibido: {len(token)} caracteres (termina en ...{token[-4:]})"
+        + ("" if len(token) == 43 else "  ⚠️ los tokens del panel tienen 43: puede haberse copiado mal"))
     kr.set_password(WEB["servicio_credencial"], WEB["clave_credencial"], token)
     log("✅ Token guardado en el Administrador de credenciales de Windows.")
     return token
@@ -163,7 +169,10 @@ def pedir_token_ventana():
         root.destroy()
         return token
     except Exception:
-        return getpass.getpass("Pegá el token de la API (panel > Tokens) y Enter: ")
+        # Sin ventana: se pide por consola de forma visible, para que se vea si el pegado funcionó
+        # (en la consola de Windows, si Ctrl+V no pega, usá clic derecho).
+        print("Pegá el token de la API (panel > Tokens) con clic derecho o Ctrl+V y apretá Enter.")
+        return input("Token: ")
 
 
 def configurar():
@@ -180,7 +189,16 @@ def configurar():
     token_api(interactivo=True)
 
     log(f"Probando conexión con {WEB['url_base']} ...")
-    suministros = obtener_suministros()
+    try:
+        suministros = obtener_suministros()
+    except RuntimeError as e:
+        if "401" in str(e):
+            # No dejar guardado un token que el panel no acepta.
+            kr.delete_password(WEB["servicio_credencial"], WEB["clave_credencial"])
+            raise RuntimeError(
+                "El panel no aceptó el token (no se guardó). Generá uno nuevo en el panel > Tokens, "
+                "copialo completo y volvé a ejecutar --configurar.") from None
+        raise
     log(f"✅ Conexión OK. Suministros activos en el panel: {len(suministros)}")
     for s in suministros:
         log(f"   NIS {s['nis']} · {s['name']}" + ("" if s.get("ready") else "  (falta cargar su contrato)"))
