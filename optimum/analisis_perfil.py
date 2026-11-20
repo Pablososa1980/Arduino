@@ -44,6 +44,7 @@ ABRIR_PAGINA_AL_TERMINAR = True     # abre el reporte en el navegador
 
 # ---- Alertas ----------------------------------------------------------------
 ALERTA_VENTANA = True               # ventana emergente en la PC
+URL_SITIO = ""                      # si hay página publicada, se incluye el enlace en la alerta
 
 ALERTA_EMAIL = {
     "activar": False,               # poné True cuando completes los datos
@@ -263,10 +264,13 @@ def analizar(registros, info, cfg):
 # -----------------------------------------------------------------------------
 # Página web
 # -----------------------------------------------------------------------------
-def generar_html(res, destino):
+def generar_html(res, destino, enlace_volver=None):
     datos = json.dumps(res, ensure_ascii=False, separators=(",", ":"))
     titulo = html.escape(f"Perfil de carga NIS {res['nis']}")
-    pagina = _PLANTILLA.replace("__TITULO__", titulo).replace("__DATOS__", datos.replace("</", "<\\/"))
+    volver = (f'<a class="volver" href="{html.escape(enlace_volver)}">← Todos los suministros</a>'
+              if enlace_volver else "")
+    pagina = (_PLANTILLA.replace("__TITULO__", titulo).replace("__VOLVER__", volver)
+              .replace("__DATOS__", datos.replace("</", "<\\/")))
     destino.parent.mkdir(parents=True, exist_ok=True)
     destino.write_text(pagina, encoding="utf-8")
     return destino
@@ -277,6 +281,7 @@ _PLANTILLA = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
 <title>__TITULO__</title>
 <style>
 :root{
@@ -360,11 +365,14 @@ th,td{padding:6px 8px;border-bottom:1px solid var(--border);text-align:right}
 th:first-child,td:first-child{text-align:left}
 th{color:var(--text-2);font-weight:600}
 .tabla-scroll{overflow-x:auto}
+.volver{display:inline-block;margin-bottom:10px;color:var(--accent);text-decoration:none;font-size:13px;font-weight:600}
+.volver:hover{text-decoration:underline}
 footer{color:var(--text-3);font-size:12px;margin-top:20px}
 </style>
 </head>
 <body>
 <div class="wrap">
+  __VOLVER__
   <header>
     <div>
       <h1 id="titulo"></h1>
@@ -615,6 +623,144 @@ let rz; addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(dib
 """
 
 
+def resumen(res, pagina_rel):
+    """Lo mínimo que necesita la portada para mostrar un suministro."""
+    claves = ("nis", "nombre", "medidor", "contratada", "tolerancia", "limite", "desde", "hasta",
+              "generado", "max_kw", "max_cuando", "max_pct", "margen_kw", "energia_kwh", "estado",
+              "sobre_contratada", "huecos", "lecturas")
+    r = {k: res[k] for k in claves}
+    r["excesos"] = len(res["excesos"])
+    r["diario"] = [[d["dia"], d["kw"]] for d in res["diario"]]
+    r["pagina"] = pagina_rel
+    return r
+
+
+_ESTADO_TXT = {"normal": "Normal", "atencion": "Sobre la contratada (dentro de tolerancia)",
+               "critico": "Supera la tolerancia"}
+
+
+def _num(n, dec=0):
+    """Formato paraguayo: 1.234,5"""
+    return f"{n:,.{dec}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+_MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+
+
+def _mes_texto(aaaa_mm):
+    try:
+        a, m = aaaa_mm.split("-")
+        return f"{_MESES[int(m) - 1]} {a}"
+    except Exception:
+        return html.escape(aaaa_mm)
+
+
+def _mini_barras(diario, limite, contratada, ancho=260, alto=56):
+    if not diario:
+        return ""
+    vmax = max([limite] + [kw for _, kw in diario]) * 1.05
+    n = len(diario)
+    banda = ancho / n
+    bw = max(2.0, min(10.0, banda - 2))
+    y = lambda v: alto - v / vmax * alto
+    barras = []
+    for i, (dia, kw) in enumerate(diario):
+        color = "var(--critical)" if kw > limite else "var(--warning)" if kw > contratada else "var(--series)"
+        x = banda * (i + 0.5) - bw / 2
+        barras.append(f'<rect x="{x:.1f}" y="{y(kw):.1f}" width="{bw:.1f}" height="{alto - y(kw):.1f}" '
+                      f'rx="1.5" fill="{color}"><title>{dia}: {_num(kw, 1)} kW</title></rect>')
+    linea = (f'<line x1="0" x2="{ancho}" y1="{y(limite):.1f}" y2="{y(limite):.1f}" '
+             f'stroke="var(--critical)" stroke-width="1.2" stroke-dasharray="4 3"/>')
+    return (f'<svg viewBox="0 0 {ancho} {alto}" width="100%" height="{alto}" preserveAspectRatio="none" '
+            f'role="img" aria-label="Demanda máxima diaria">{"".join(barras)}{linea}</svg>')
+
+
+def generar_indice(resumenes, destino, historial=None, titulo="Monitoreo de potencia"):
+    """
+    Portada con una tarjeta por suministro.
+    resumenes: lista de dicts de resumen(). historial: {nis: [(mes, ruta_relativa), ...]}
+    """
+    historial = historial or {}
+    css = _PLANTILLA[_PLANTILLA.index("<style>"):_PLANTILLA.index("</style>") + 8]
+    orden = {"critico": 0, "atencion": 1, "normal": 2}
+    tarjetas = []
+    for r in sorted(resumenes, key=lambda r: (orden.get(r["estado"], 3), r["nis"])):
+        meses = historial.get(r["nis"], [])
+        enlaces_hist = " · ".join(f'<a href="{html.escape(ruta)}">{_mes_texto(mes)}</a>' for mes, ruta in meses)
+        margen = (f'Margen hasta el límite: <b>{_num(r["margen_kw"])} kW</b>' if r["margen_kw"] >= 0
+                  else f'<b style="color:var(--critical-text)">Excede el límite en {_num(-r["margen_kw"])} kW</b>')
+        tarjetas.append(f"""
+    <article class="kpi suministro {r['estado']}">
+      <div class="cab">
+        <div><div class="l">NIS {html.escape(r['nis'])} · Medidor {html.escape(r['medidor'])}</div>
+          <h2>{html.escape(r['nombre'] or 'Suministro ' + r['nis'])}</h2></div>
+        <span class="pill {r['estado']}">{_ESTADO_TXT[r['estado']]}</span>
+      </div>
+      <div class="fila">
+        <div><div class="l">Demanda máxima</div><div class="v">{_num(r['max_kw'])}<small>kW</small></div>
+          <div class="d">{_num(r['max_pct'], 1)} % de la contratada</div></div>
+        <div><div class="l">Contratada / límite</div><div class="v">{_num(r['contratada'])}<small>/ {_num(r['limite'])} kW</small></div>
+          <div class="d">Tolerancia {_num(r['tolerancia'] * 100)} %</div></div>
+      </div>
+      <div class="d">Máximos diarios del mes</div>
+      {_mini_barras(r['diario'], r['limite'], r['contratada'])}
+      <div class="d">{margen} · Intervalos sobre el límite: <b>{r['excesos']}</b></div>
+      <div class="d">Período {html.escape(r['desde'])} a {html.escape(r['hasta'])}</div>
+      <a class="boton" href="{html.escape(r['pagina'])}">Ver detalle →</a>
+      {f'<div class="d hist">Historial mensual: {enlaces_hist}</div>' if enlaces_hist else ''}
+    </article>""")
+
+    criticos = sum(1 for r in resumenes if r["estado"] == "critico")
+    aviso = (f'<div class="estado critico"><div><strong>{criticos} suministro(s) superan la tolerancia</strong>'
+             f'<span>Revisá el detalle de los marcados en rojo.</span></div></div>' if criticos else
+             '<div class="estado normal"><div><strong>Todos los suministros dentro de la tolerancia</strong>'
+             f'<span>{len(resumenes)} suministro(s) monitoreado(s).</span></div></div>')
+    pagina = f"""<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{html.escape(titulo)}</title>
+{css}
+<style>
+.suministros{{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}}
+.suministro{{display:flex;flex-direction:column;gap:8px;border-left-width:6px;padding:14px 16px}}
+.suministro.normal{{border-left-color:var(--good)}} .suministro.atencion{{border-left-color:var(--warning)}}
+.suministro.critico{{border-left-color:var(--critical)}}
+.suministro h2{{font-size:17px;margin:2px 0 0}}
+.cab{{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}}
+.fila{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+.pill{{font-size:11px;font-weight:650;padding:3px 8px;border-radius:99px;white-space:nowrap}}
+.pill.normal{{color:var(--good-text);background:color-mix(in srgb,var(--good) 14%,transparent)}}
+.pill.atencion{{color:var(--warning-text);background:color-mix(in srgb,var(--warning) 18%,transparent)}}
+.pill.critico{{color:var(--critical-text);background:color-mix(in srgb,var(--critical) 14%,transparent)}}
+.boton{{align-self:flex-start;margin-top:4px;background:var(--accent);color:#fff;text-decoration:none;
+  padding:7px 14px;border-radius:7px;font-weight:600;font-size:13px}}
+:root[data-theme="dark"] .boton{{color:#1a1a19}}
+@media (prefers-color-scheme: dark){{:root:not([data-theme="light"]) .boton{{color:#1a1a19}}}}
+.hist a{{color:var(--accent)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><div><h1>{html.escape(titulo)}</h1>
+    <div class="sub">Demanda de potencia según Optimum.SM, comparada con la potencia contratada y su tolerancia.</div></div>
+    <div class="sub">Actualizado: {datetime.now():%d/%m/%Y %H:%M}</div></header>
+  {aviso}
+  <section class="suministros">{''.join(tarjetas)}
+  </section>
+  <footer>Se actualiza automáticamente todos los días.</footer>
+</div>
+</body>
+</html>
+"""
+    destino = Path(destino)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_text(pagina, encoding="utf-8")
+    return destino
+
+
 # -----------------------------------------------------------------------------
 # Alertas
 # -----------------------------------------------------------------------------
@@ -645,6 +791,8 @@ def _texto_alerta(res, nuevos):
     if len(nuevos) > 20:
         lineas.append(f"  ... y {len(nuevos) - 20} más")
     lineas += ["", f"Período analizado: {res['desde']} a {res['hasta']}", f"Medidor: {res['medidor']}"]
+    if URL_SITIO:
+        lineas += ["", f"Ver detalle: {URL_SITIO.rstrip('/')}/perfil_{res['nis']}.html"]
     return "\n".join(lineas)
 
 
@@ -696,18 +844,21 @@ def _email(asunto, cuerpo, adjunto=None):
 
 
 def revisar_alertas(res, pagina=None):
-    """Avisa solo por intervalos sobre el límite que todavía no se hayan avisado."""
+    """
+    Avisa solo por intervalos sobre el límite que todavía no se hayan avisado.
+    Devuelve el texto de la alerta si hubo una nueva (si no, None).
+    """
     if not res["excesos"]:
         log(f"✅ Sin excesos: máximo {res['max_kw']:,.1f} kW ({res['max_pct']:.1f} % de la contratada), "
             f"límite {res['limite']:,.0f} kW.")
-        return False
+        return None
 
     estado = _cargar_estado()
     ya_avisados = set(estado.get(res["nis"], []))
     nuevos = [e for e in res["excesos"] if e["inicio"] not in ya_avisados]
     if not nuevos:
         log(f"⚠️  Hay {len(res['excesos'])} intervalo(s) sobre el límite, ya avisados antes.")
-        return False
+        return None
 
     asunto = f"ALERTA potencia NIS {res['nis']}: {res['max_kw']:,.0f} kW (límite {res['limite']:,.0f} kW)"
     texto = _texto_alerta(res, nuevos)
@@ -725,13 +876,14 @@ def revisar_alertas(res, pagina=None):
 
     estado[res["nis"]] = sorted(ya_avisados | {e["inicio"] for e in nuevos})
     _guardar_estado(estado)
-    return True
+    return texto
 
 
 # -----------------------------------------------------------------------------
 # Punto de entrada
 # -----------------------------------------------------------------------------
-def procesar(archivo_excel, nis=None, abrir=ABRIR_PAGINA_AL_TERMINAR):
+def procesar(archivo_excel, nis=None, abrir=ABRIR_PAGINA_AL_TERMINAR, destino=None,
+             enlace_volver=None, alertar=True):
     archivo_excel = Path(archivo_excel)
     registros, info = leer_perfil(archivo_excel)
     nis = str(nis or info["punto"] or "").strip()
@@ -741,9 +893,10 @@ def procesar(archivo_excel, nis=None, abrir=ABRIR_PAGINA_AL_TERMINAR):
 
     log(f"Analizando {archivo_excel.name}: {len(registros)} lecturas")
     res = analizar(registros, info, cfg)
-    pagina = generar_html(res, CARPETA_REPORTES / f"perfil_{nis}.html")
+    pagina = generar_html(res, Path(destino) if destino else CARPETA_REPORTES / f"perfil_{nis}.html",
+                          enlace_volver)
     log(f"Página generada: {pagina}")
-    revisar_alertas(res, pagina)
+    res["alerta_nueva"] = revisar_alertas(res, pagina) if alertar else None
     if abrir:
         webbrowser.open(pagina.as_uri())
     return res, pagina

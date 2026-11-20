@@ -475,7 +475,7 @@ def aplicar(page):
     page.wait_for_timeout(1500)
 
 
-def descargar_excel(page, nis):
+def descargar_excel(page, nis, etiqueta=None):
     log("12) Descargando Excel")
     # En orden de prioridad: el primero es el que funciona en la pantalla de Medidores.
     selectores = [
@@ -522,7 +522,8 @@ def descargar_excel(page, nis):
         original = descarga.suggested_filename or "perfil.xlsx"
         extension = Path(original).suffix or ".xlsx"
         sufijo = "" if i == 1 else f"_{i}"
-        destino = CARPETA_DESCARGAS / f"perfil_{nis}_{date.today():%Y%m%d}{sufijo}{extension}"
+        etiqueta = etiqueta or f"{date.today():%Y%m%d}"
+        destino = CARPETA_DESCARGAS / f"perfil_{nis}_{etiqueta}{sufijo}{extension}"
         falla = descarga.failure()   # espera a que termine; None = OK
         if falla:
             log(f"   La descarga '{original}' falló: {falla}")
@@ -590,10 +591,12 @@ def ejecutar_en_hilo(funcion, *args):
     return resultado.get("ok")
 
 
-def descargar_perfil(nis, usuario, clave):
+def descargar_perfil(nis, usuario, clave, desde=None, hasta=None, etiqueta=None):
+    """Por defecto: del 1° del mes actual a hoy. `desde`/`hasta` en formato YYYY-MM-DD."""
     hoy = date.today()
-    desde = hoy.replace(day=1).isoformat()
-    hasta = hoy.isoformat()
+    desde = desde or hoy.replace(day=1).isoformat()
+    hasta = hasta or hoy.isoformat()
+    log(f"   Período: {desde} a {hasta}")
 
     with sync_playwright() as p:
         navegador = abrir_navegador(p)
@@ -637,7 +640,7 @@ def descargar_perfil(nis, usuario, clave):
             paso = "canal"
             log("10) Canal");          seleccionar(page, "Canal", CANAL, modo="contiene")
             paso = "aplicar";          aplicar(page)
-            paso = "excel";            archivo = descargar_excel(page, nis)
+            paso = "excel";            archivo = descargar_excel(page, nis, etiqueta)
             return archivo
         except Exception as e:
             log(f"ERROR en el paso '{paso}': {e}")
@@ -674,8 +677,11 @@ def pedir_clave_ventana():
     return clave
 
 
-def obtener_clave():
-    """Variable OPTIMUM_PASS -> Credential Manager -> ventanita (y se guarda)."""
+def obtener_clave(interactivo=True):
+    """
+    Variable OPTIMUM_PASS -> Credential Manager -> ventanita (y se guarda).
+    Con interactivo=False (tarea programada) nunca pregunta: si falta, da error.
+    """
     if os.environ.get("OPTIMUM_PASS"):
         return os.environ["OPTIMUM_PASS"]
 
@@ -698,6 +704,11 @@ def obtener_clave():
             log("✅ Contraseña recuperada del Administrador de credenciales de Windows.")
             return clave
 
+    if not interactivo:
+        raise RuntimeError(
+            "No hay contraseña de Optimum guardada. Ejecutá una vez: "
+            "python orquestador_diario.py --configurar"
+        )
     try:
         clave = pedir_clave_ventana()
     except Exception:  # sin entorno gráfico
