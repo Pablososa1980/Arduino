@@ -1,74 +1,72 @@
 """
-Orquestador diario: Optimum.SM -> análisis -> página web en Hostinger.
+Orquestador diario: Optimum.SM -> panel web (Hostinger, PHP + MySQL).
 
 Qué hace cada vez que corre (pensado para el Programador de tareas de Windows):
-  1. Para cada suministro de SUMINISTROS (analisis_perfil.py) descarga el
-     Perfil de Carga del mes actual (del 1° a hoy) sin mostrar el navegador.
-     El día 1 de cada mes, además, baja el mes anterior completo para cerrarlo.
-  2. Genera la página de cada suministro y una portada (index.html).
-  3. Revisa alertas (correo si está configurado; ventana si corrés a mano).
-  4. Sube todo a Hostinger por FTP (FTPS si el servidor lo acepta).
+  1. Le pide al panel web la lista de suministros activos (se agregan desde el
+     panel: no hace falta tocar este script).
+  2. Para cada uno descarga de Optimum el Perfil de Carga del mes actual
+     (del 1° a hoy), sin mostrar el navegador.
+  3. Los días 1 a DIAS_RELLENO de cada mes, además, vuelve a bajar el mes
+     anterior completo, para que no se pierda la "cola" final del mes.
+  4. Envía las lecturas al panel por HTTPS con curl.exe, que atraviesa el proxy
+     corporativo con la sesión de Windows (mismo método que el panel SEP2).
+     El panel calcula los kW, guarda el histórico y manda las alertas por correo.
   5. Deja un registro en logs/ y termina con código 0 (OK) o 1 (hubo errores).
 
 Primera vez (una sola vez, a mano):
     python orquestador_diario.py --configurar
   Guarda en el Administrador de credenciales de Windows la contraseña de
-  Optimum y la del FTP de Hostinger, y prueba la conexión FTP.
+  Optimum y el token de la API (se genera en el panel > Tokens) y prueba la conexión.
 
-Otras opciones útiles para probar:
-    python orquestador_diario.py --sin-subir      # todo menos subir a Hostinger
-    python orquestador_diario.py --sin-descargar  # usa el último Excel ya bajado
-    python orquestador_diario.py --solo-subir     # sube lo que ya está en reportes/web
-
-Tarea programada (crea el .bat y la tarea de Windows, no hace falta descargarlos):
-    python orquestador_diario.py --crear-tarea          # todos los días 07:15
-    python orquestador_diario.py --crear-tarea 06:30    # otra hora
+Otras opciones:
+    python orquestador_diario.py --sin-subir             # descarga pero no envía
+    python orquestador_diario.py --sin-descargar         # reenvía el último Excel ya bajado
+    python orquestador_diario.py --mes 2026-10           # carga un mes pasado completo (histórico)
+    python orquestador_diario.py --nis 1379190           # solo ese suministro
+    python orquestador_diario.py --archivo X.xlsx --nis 1379190   # envía un Excel bajado a mano
+    python orquestador_diario.py --crear-tarea [HH:MM]   # crea la tarea diaria de Windows
 """
 
 import argparse
-import ftplib
+import calendar
 import getpass
 import io
 import json
 import os
-import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
+import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 CARPETA = Path(__file__).resolve().parent
 sys.path.insert(0, str(CARPETA))
 
-import analisis_perfil as ap          # noqa: E402
-import descargar_perfil_carga as dp   # noqa: E402
+import analisis_perfil as ap          # noqa: E402  (lectura del Excel de Optimum)
+import descargar_perfil_carga as dp   # noqa: E402  (automatización de Optimum)
 
 # =============================================================================
-# CONFIGURACIÓN — Hostinger
+# CONFIGURACIÓN
 # =============================================================================
-# Datos en hPanel > Archivos > Cuentas FTP (host, usuario y puerto).
-HOSTINGER = {
-    "host": "ftp.tudominio.com",          # o la IP que muestra hPanel
-    "puerto": 21,
-    "usuario": "u123456789.tudominio.com",
-    "carpeta_remota": "public_html/potencia",  # quedaría en https://tudominio.com/potencia/
-    "usar_tls": True,                     # FTPS explícito (cifrado). Hostinger lo acepta.
-    "permitir_sin_cifrar": False,         # True = si FTPS falla, usa FTP común (la clave viaja sin cifrar)
-    # La contraseña FTP se guarda en el Administrador de credenciales de Windows:
+WEB = {
+    "url_base": "https://tudominio.com",   # dirección del panel, sin barra final
+    # El token de la API se guarda en el Administrador de credenciales de Windows:
     "servicio_credencial": "Automatismo_Telemedicion",
-    "clave_credencial": "hostinger_ftp",
+    "clave_credencial": "potencia_api_token",
+    "timeout_s": 180,
+    "intentos": 3,
 }
-
-URL_SITIO = "https://tudominio.com/potencia"   # dirección pública (va en los correos de alerta)
-TITULO_SITIO = "Monitoreo de potencia — ANDE"
-VENTANA_ALERTA_AL_FINAL = True       # muestra un aviso en la PC al terminar si hubo alertas nuevas
-CARPETA_WEB = CARPETA / "reportes" / "web"        # copia local exacta de lo que se sube
-ARCHIVO_RESUMENES = CARPETA / "reportes" / "resumenes.json"
+DIAS_RELLENO = 5                     # días 1..N: también se reenvía el mes anterior completo
+REINTENTOS_DESCARGA = 2              # reintentos por suministro si Optimum falla
+VENTANA_ALERTA_AL_FINAL = True       # aviso en la PC si el panel detectó alertas nuevas
 CARPETA_LOGS = CARPETA / "logs"
 GUARDAR_LOGS_DIAS = 60
-REINTENTOS_DESCARGA = 2              # reintentos por suministro si Optimum falla
+NOMBRE_TAREA = "Optimum - Perfil de Carga diario"
 # =============================================================================
 
 
@@ -124,49 +122,238 @@ def _keyring():
         raise SystemExit("Falta 'keyring':  pip install keyring")
 
 
-def clave_ftp(interactivo=False):
-    if os.environ.get("HOSTINGER_FTP_PASS"):
-        return os.environ["HOSTINGER_FTP_PASS"]
+def token_api(interactivo=False):
+    if os.environ.get("POTENCIA_API_TOKEN"):
+        return os.environ["POTENCIA_API_TOKEN"].strip()
     kr = _keyring()
-    clave = kr.get_password(HOSTINGER["servicio_credencial"], HOSTINGER["clave_credencial"])
-    if clave:
-        return clave
+    token = kr.get_password(WEB["servicio_credencial"], WEB["clave_credencial"])
+    if token:
+        return token
     if not interactivo:
-        raise RuntimeError("No hay contraseña FTP guardada. Ejecutá: python orquestador_diario.py --configurar")
-    clave = getpass.getpass(f"Contraseña FTP de Hostinger ({HOSTINGER['usuario']}): ")
-    if not clave:
+        raise RuntimeError("No hay token de la API guardado. Ejecutá: python orquestador_diario.py --configurar")
+    token = getpass.getpass("Pegá el token de la API (panel > Tokens) y Enter: ").strip()
+    if not token:
         raise SystemExit("Cancelado.")
-    kr.set_password(HOSTINGER["servicio_credencial"], HOSTINGER["clave_credencial"], clave)
-    log("✅ Contraseña FTP guardada en el Administrador de credenciales de Windows.")
-    return clave
+    kr.set_password(WEB["servicio_credencial"], WEB["clave_credencial"], token)
+    log("✅ Token guardado en el Administrador de credenciales de Windows.")
+    return token
 
 
 def configurar():
-    log("Configuración inicial de credenciales")
+    log("Configuración inicial")
     kr = _keyring()
     if kr.get_password(dp.SERVICIO_CREDENCIAL, dp.CLAVE_CREDENCIAL):
         log("✅ La contraseña de Optimum ya está guardada (la misma del script del MDC).")
     else:
         dp.obtener_clave(interactivo=True)
 
-    if kr.get_password(HOSTINGER["servicio_credencial"], HOSTINGER["clave_credencial"]):
-        r = input("Ya hay una contraseña FTP guardada. ¿Reemplazarla? (s/N): ").strip().lower()
-        if r == "s":
-            kr.delete_password(HOSTINGER["servicio_credencial"], HOSTINGER["clave_credencial"])
-    clave_ftp(interactivo=True)
+    if kr.get_password(WEB["servicio_credencial"], WEB["clave_credencial"]):
+        if input("Ya hay un token de la API guardado. ¿Reemplazarlo? (s/N): ").strip().lower() == "s":
+            kr.delete_password(WEB["servicio_credencial"], WEB["clave_credencial"])
+    token_api(interactivo=True)
 
-    log("Probando conexión FTP...")
-    with conectar_ftp() as ftp:
-        ir_a_carpeta(ftp, HOSTINGER["carpeta_remota"], crear=True)
-        log(f"✅ Conexión OK. Carpeta remota: /{HOSTINGER['carpeta_remota']}")
+    log(f"Probando conexión con {WEB['url_base']} ...")
+    suministros = obtener_suministros()
+    log(f"✅ Conexión OK. Suministros activos en el panel: {len(suministros)}")
+    for s in suministros:
+        log(f"   NIS {s['nis']} · {s['name']}" + ("" if s.get("ready") else "  (falta cargar su contrato)"))
 
 
 # -----------------------------------------------------------------------------
-# Tarea programada de Windows (sin tener que descargar archivos .bat)
+# API del panel (curl.exe: atraviesa el proxy corporativo con la sesión de Windows)
 # -----------------------------------------------------------------------------
-NOMBRE_TAREA = "Optimum - Perfil de Carga diario"
+def _proxy_para(url):
+    """Proxy configurado en Windows, salvo para direcciones locales o excluidas."""
+    host = urlparse(url).hostname or ""
+    if host in ("localhost", "127.0.0.1") or urllib.request.proxy_bypass(host):
+        return None
+    proxies = urllib.request.getproxies()
+    return proxies.get("https") or proxies.get("http")
 
 
+def llamar_api(metodo, ruta, cuerpo=None):
+    """Llama a la API con curl y devuelve el JSON de respuesta. Lanza RuntimeError si falla."""
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise RuntimeError("No se encontró curl.exe (viene con Windows 10 1803 o posterior).")
+    url = WEB["url_base"].rstrip("/") + "/" + ruta.lstrip("/")
+    token = token_api()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # El token va en un archivo de cabeceras (no en la línea de comandos, donde otros procesos lo verían).
+        cabeceras = Path(tmp) / "cabeceras.txt"
+        cabeceras.write_text(f"Authorization: Bearer {token}\nContent-Type: application/json\n", encoding="utf-8")
+        cmd = [curl, "--silent", "--show-error", "--max-time", str(WEB["timeout_s"]),
+               "-X", metodo, url, "-H", f"@{cabeceras}", "-w", "\n%{http_code}"]
+        if cuerpo is not None:
+            datos = Path(tmp) / "cuerpo.json"
+            datos.write_text(json.dumps(cuerpo, ensure_ascii=False), encoding="utf-8")
+            cmd += ["--data-binary", f"@{datos}"]
+        proxy = _proxy_para(url)
+        if proxy:
+            cmd[1:1] = ["--proxy-anyauth", "--proxy-user", ":", "-x", proxy]
+
+        ultimo = None
+        for intento in range(1, WEB["intentos"] + 1):
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   timeout=WEB["timeout_s"] + 15)
+                if p.returncode != 0:
+                    ultimo = f"curl devolvió {p.returncode}: {p.stderr.strip()[:300]}"
+                else:
+                    cuerpo_txt, _, codigo = p.stdout.rpartition("\n")
+                    try:
+                        respuesta = json.loads(cuerpo_txt) if cuerpo_txt.strip() else {}
+                    except ValueError:
+                        respuesta = {"error": cuerpo_txt.strip()[:300]}
+                    if codigo.strip() == "200" and respuesta.get("ok"):
+                        return respuesta
+                    ultimo = f"HTTP {codigo.strip()}: {respuesta.get('error', '')}"
+                    if codigo.strip() in ("401", "403", "422"):
+                        break   # errores que no se arreglan reintentando
+            except subprocess.TimeoutExpired:
+                ultimo = "sin respuesta del servidor (timeout)"
+            if intento < WEB["intentos"]:
+                log(f"   Aviso: falló la llamada a {ruta} ({ultimo}); reintento {intento + 1}/{WEB['intentos']}")
+                time.sleep(5)
+        raise RuntimeError(f"La API respondió con error: {ultimo}")
+
+
+def obtener_suministros():
+    return llamar_api("GET", "api/supplies.php")["supplies"]
+
+
+def armar_paquete(archivo_excel, nis, desde, hasta):
+    """Convierte el Excel de Optimum en el paquete optimum-readings-v1 que recibe el panel."""
+    registros, info = ap.leer_perfil(archivo_excel)
+    if info["punto"] and str(info["punto"]).strip() != str(nis):
+        raise RuntimeError(f"El Excel es del Punto de Medida {info['punto']}, no del {nis}: no se envía.")
+    if not registros:
+        raise RuntimeError("El Excel no tiene lecturas.")
+    lecturas = []
+    for r in registros:
+        hueco = r["valor"] is None or r["estado"].lower() == "hueco"
+        lecturas.append([r["inicio"].strftime("%Y-%m-%d %H:%M"), None if hueco else r["valor"], r["estado"]])
+    return {
+        "format": "optimum-readings-v1",
+        "nis": str(nis),
+        "period_start": desde or registros[0]["inicio"].strftime("%Y-%m-%d"),
+        "period_end": hasta or registros[-1]["inicio"].strftime("%Y-%m-%d"),
+        "unit": info["unidad"] or "W",
+        "meter": info["medidor"],
+        "channel": info["canal"],
+        "source_file": Path(archivo_excel).name,
+        "readings": lecturas,
+    }
+
+
+def enviar(archivo_excel, nis, desde=None, hasta=None):
+    paquete = armar_paquete(archivo_excel, nis, desde, hasta)
+    r = llamar_api("POST", "api/readings-import.php", paquete)
+    estado = {"normal": "Normal", "atencion": "Sobre la contratada", "critico": "SUPERA LA TOLERANCIA"}.get(r.get("status"), r.get("status"))
+    log(f"   ✅ Panel: {r['readings']} lecturas ({r['inserted']} nuevas, {r['updated']} actualizadas) · "
+        f"máx. {r.get('max_kw')} kW / límite {r.get('limit_kw')} kW · {estado}")
+    if r.get("new_alerts"):
+        log(f"   🚨 {r['new_alerts']} intervalo(s) nuevo(s) sobre el límite"
+            + (f" · correo enviado ({r['mailed_alerts']})" if r.get("mailed_alerts") else ""))
+    return r
+
+
+# -----------------------------------------------------------------------------
+# Descarga desde Optimum
+# -----------------------------------------------------------------------------
+def descargar(s, usuario, clave, desde=None, hasta=None, etiqueta=None):
+    dp.MEDIDOR_PREFIJO = s.get("meter_prefix") or "EGM"
+    dp.CANAL = s.get("channel") or dp.CANAL
+    ultimo_error = None
+    for intento in range(1, REINTENTOS_DESCARGA + 2):
+        try:
+            log(f"   Descarga de Optimum (intento {intento})")
+            return dp.ejecutar_en_hilo(dp.descargar_perfil, s["nis"], usuario, clave, desde, hasta, etiqueta)
+        except Exception as e:  # noqa: BLE001
+            ultimo_error = e
+            log(f"   Falló: {str(e).splitlines()[0] if str(e) else repr(e)}")
+            time.sleep(20)
+    raise ultimo_error
+
+
+def ultimo_excel(nis):
+    candidatos = sorted(dp.CARPETA_DESCARGAS.glob(f"perfil_{nis}_*.xls*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidatos[0] if candidatos else None
+
+
+def rango_mes(aaaa_mm):
+    a, m = (int(x) for x in aaaa_mm.split("-"))
+    return date(a, m, 1), date(a, m, calendar.monthrange(a, m)[1])
+
+
+def correr(descargar_datos=True, subir=True, mes=None, solo_nis=None):
+    hoy = date.today()
+    errores, alertas = [], []
+
+    dp.HEADLESS = True            # sin ventana del navegador
+    dp.PAUSA_SI_FALLA_S = 0       # nunca se queda esperando a nadie
+    dp.LENTITUD_MS = 50
+
+    suministros = obtener_suministros()
+    if solo_nis:
+        suministros = [s for s in suministros if s["nis"] == str(solo_nis)]
+        if not suministros:
+            raise RuntimeError(f"El NIS {solo_nis} no está activo en el panel.")
+    log(f"Suministros a procesar: {', '.join(s['nis'] for s in suministros) or 'ninguno'}")
+
+    usuario = dp.USUARIO
+    clave = dp.obtener_clave(interactivo=False) if descargar_datos else None
+
+    # Qué períodos bajar
+    if mes:
+        ini, fin = rango_mes(mes)
+        periodos = [(ini.isoformat(), min(fin, hoy).isoformat(), f"{mes}_completo")]
+    else:
+        periodos = []
+        if hoy.day <= DIAS_RELLENO:
+            fin_ant = hoy.replace(day=1) - timedelta(days=1)
+            periodos.append((fin_ant.replace(day=1).isoformat(), fin_ant.isoformat(), f"{fin_ant:%Y-%m}_completo"))
+        periodos.append((hoy.replace(day=1).isoformat(), hoy.isoformat(), None))
+
+    for s in suministros:
+        log(f"=== {s['name']} · NIS {s['nis']} ===")
+        if not s.get("ready"):
+            msg = "falta cargar su potencia contratada / factor en el panel"
+            log(f"   ⚠️  Se omite: {msg}")
+            errores.append(f"{s['nis']}: {msg}")
+            continue
+        for desde, hasta, etiqueta in periodos:
+            try:
+                if descargar_datos:
+                    log(f"   Período {desde} a {hasta}")
+                    xls = descargar(s, usuario, clave, desde, hasta, etiqueta)
+                else:
+                    xls = ultimo_excel(s["nis"])
+                    if not xls:
+                        raise RuntimeError("No hay ningún Excel descargado de este suministro.")
+                    desde = hasta = None
+                    log(f"   Reenviando {xls.name}")
+                if subir:
+                    r = enviar(xls, s["nis"], desde, hasta)
+                    if r.get("new_alerts"):
+                        alertas.append(f"{s['name']} (NIS {s['nis']}): {r['new_alerts']} intervalo(s) sobre el límite; "
+                                       f"máx. {r.get('max_kw')} kW, límite {r.get('limit_kw')} kW.")
+                if not descargar_datos:
+                    break
+            except Exception as e:  # noqa: BLE001
+                errores.append(f"{s['nis']} ({desde or 'último'}): {e}")
+                log(f"   ❌ {e}")
+                traceback.print_exc()
+
+    if alertas and VENTANA_ALERTA_AL_FINAL:
+        ap._ventana("Alerta de potencia - Optimum", "\n\n".join(alertas)[:3000])
+    return errores
+
+
+# -----------------------------------------------------------------------------
+# Tarea programada de Windows
+# -----------------------------------------------------------------------------
 def crear_tarea(hora="07:15"):
     """Escribe ejecutar_orquestador.bat (con el Python que estás usando) y crea la tarea diaria."""
     if not sys.platform.startswith("win"):
@@ -176,212 +363,35 @@ def crear_tarea(hora="07:15"):
         python = python.with_name("python.exe")
     prefijo = Path(sys.prefix)
     activar = prefijo / "Scripts" / "activate.bat"
-    lineas = [
-        "@echo off",
-        "REM Generado por orquestador_diario.py --crear-tarea",
-        'cd /d "%~dp0"',
-        "if not exist logs mkdir logs",
-    ]
+    lineas = ["@echo off", "REM Generado por orquestador_diario.py --crear-tarea",
+              'cd /d "%~dp0"', "if not exist logs mkdir logs"]
     if activar.exists():   # Anaconda: activar el entorno para que encuentre sus DLL
         lineas.append(f'call "{activar}" "{prefijo}"')
-    lineas += [
-        f'"{python}" orquestador_diario.py %* >> "logs\\tarea_programada.log" 2>&1',
-        "exit /b %ERRORLEVEL%",
-    ]
+    lineas += [f'"{python}" orquestador_diario.py %* >> "logs\\tarea_programada.log" 2>&1',
+               "exit /b %ERRORLEVEL%"]
     bat = CARPETA / "ejecutar_orquestador.bat"
     # cmd.exe lee los .bat con la página de códigos OEM (rutas con tildes/ñ incluidas)
     bat.write_text("\r\n".join(lineas) + "\r\n", encoding="oem", errors="replace")
     log(f"✅ Creado {bat}")
-
-    comando = ["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", hora,
-               "/TN", NOMBRE_TAREA, "/TR", f'"{bat}"']
+    comando = ["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", hora, "/TN", NOMBRE_TAREA, "/TR", f'"{bat}"']
     r = subprocess.run(comando, capture_output=True, text=True)
-    salida = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
-        raise RuntimeError(f"schtasks no pudo crear la tarea:\n{salida.strip()}")
+        raise RuntimeError(f"schtasks no pudo crear la tarea:\n{((r.stdout or '') + (r.stderr or '')).strip()}")
     log(f"✅ Tarea '{NOMBRE_TAREA}' creada: todos los días a las {hora}.")
     log(f'   Probarla ahora:  schtasks /Run /TN "{NOMBRE_TAREA}"')
-    log("   Verla o editarla: Programador de tareas de Windows (Biblioteca del Programador de tareas).")
 
 
 # -----------------------------------------------------------------------------
-# FTP
-# -----------------------------------------------------------------------------
-def conectar_ftp():
-    clave = clave_ftp()
-    h = HOSTINGER
-    if h["usar_tls"]:
-        try:
-            ftp = ftplib.FTP_TLS(timeout=60)
-            ftp.connect(h["host"], h["puerto"])
-            ftp.login(h["usuario"], clave)
-            ftp.prot_p()                      # datos cifrados también
-            ftp.set_pasv(True)
-            log(f"   Conectado por FTPS a {h['host']}")
-            return ftp
-        except (ftplib.all_errors) as e:
-            if not h.get("permitir_sin_cifrar"):
-                raise RuntimeError(f"No se pudo conectar por FTPS ({e}). Revisá host/usuario/clave; "
-                                   "si tu servidor no admite FTPS, poné permitir_sin_cifrar = True.")
-            log(f"   FTPS no disponible ({e}); pruebo FTP común")
-    ftp = ftplib.FTP(timeout=60)
-    ftp.connect(h["host"], h["puerto"])
-    ftp.login(h["usuario"], clave)
-    ftp.set_pasv(True)
-    log(f"   Conectado por FTP a {h['host']}")
-    return ftp
-
-
-def ir_a_carpeta(ftp, ruta, crear=True):
-    ftp.cwd("/")
-    for parte in [p for p in ruta.replace("\\", "/").split("/") if p]:
-        try:
-            ftp.cwd(parte)
-        except ftplib.error_perm:
-            if not crear:
-                raise
-            ftp.mkd(parte)
-            ftp.cwd(parte)
-
-
-def subir_carpeta(local, remota):
-    """Sube todos los archivos de `local` a `remota` (sube a .tmp y renombra: nunca queda una página a medias)."""
-    archivos = sorted(p for p in Path(local).rglob("*") if p.is_file())
-    if not archivos:
-        log("   No hay archivos para subir.")
-        return 0
-    with conectar_ftp() as ftp:
-        for archivo in archivos:
-            rel = archivo.relative_to(local).as_posix()
-            carpeta_rel, _, nombre = rel.rpartition("/")
-            ir_a_carpeta(ftp, f"{remota}/{carpeta_rel}" if carpeta_rel else remota, crear=True)
-            temporal = nombre + ".tmp"
-            with open(archivo, "rb") as f:
-                ftp.storbinary(f"STOR {temporal}", f)
-            try:
-                ftp.delete(nombre)
-            except ftplib.error_perm:
-                pass
-            ftp.rename(temporal, nombre)
-            log(f"   ↑ {rel}")
-    return len(archivos)
-
-
-# -----------------------------------------------------------------------------
-# Pasos
-# -----------------------------------------------------------------------------
-def descargar(nis, usuario, clave, desde=None, hasta=None, etiqueta=None):
-    ultimo_error = None
-    for intento in range(1, REINTENTOS_DESCARGA + 2):
-        try:
-            log(f"   Descarga NIS {nis} (intento {intento})")
-            return dp.ejecutar_en_hilo(dp.descargar_perfil, nis, usuario, clave, desde, hasta, etiqueta)
-        except Exception as e:  # noqa: BLE001
-            ultimo_error = e
-            log(f"   Falló: {str(e).splitlines()[0] if str(e) else repr(e)}")
-            time.sleep(20)
-    raise ultimo_error
-
-
-def ultimo_excel(nis, etiqueta_prefijo=""):
-    candidatos = sorted(dp.CARPETA_DESCARGAS.glob(f"perfil_{nis}_{etiqueta_prefijo}*.xls*"),
-                        key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidatos[0] if candidatos else None
-
-
-def cargar_resumenes():
-    try:
-        return json.loads(ARCHIVO_RESUMENES.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def historial_local():
-    """{nis: [(mes, ruta_relativa), ...]} con las páginas mensuales ya generadas."""
-    hist = {}
-    for p in sorted((CARPETA_WEB / "historial").glob("perfil_*_*.html"), reverse=True):
-        _, nis, mes = p.stem.split("_", 2)
-        hist.setdefault(nis, []).append((mes, f"historial/{p.name}"))
-    return hist
-
-
-def correr(descargar_datos=True, subir=True):
-    hoy = date.today()
-    errores = []
-    resumenes = cargar_resumenes()
-    CARPETA_WEB.mkdir(parents=True, exist_ok=True)
-
-    # El navegador no se muestra y nunca se queda esperando a nadie.
-    dp.HEADLESS = True
-    dp.PAUSA_SI_FALLA_S = 0
-    dp.LENTITUD_MS = 50
-    # Durante la corrida no se abren ventanas (bloquearían la subida); se avisa al final.
-    ap.ALERTA_VENTANA = False
-    ap.URL_SITIO = URL_SITIO
-    alertas = []
-
-    usuario = dp.USUARIO
-    clave = dp.obtener_clave(interactivo=False) if descargar_datos else None
-
-    for nis, cfg in ap.SUMINISTROS.items():
-        log(f"=== Suministro {nis} ({cfg.get('nombre', '')}) ===")
-        try:
-            # Día 1: cerrar el mes anterior completo (queda en historial/)
-            if descargar_datos and hoy.day == 1:
-                fin_ant = hoy - timedelta(days=1)
-                ini_ant = fin_ant.replace(day=1)
-                etiqueta = f"{ini_ant:%Y-%m}_completo"
-                xls = descargar(nis, usuario, clave, ini_ant.isoformat(), fin_ant.isoformat(), etiqueta)
-                res_ant, _ = ap.procesar(xls, nis, abrir=False, alertar=True, enlace_volver="../index.html",
-                                     destino=CARPETA_WEB / "historial" / f"perfil_{nis}_{ini_ant:%Y-%m}.html")
-                if res_ant["alerta_nueva"]:
-                    alertas.append(res_ant["alerta_nueva"])
-
-            xls = descargar(nis, usuario, clave) if descargar_datos else ultimo_excel(nis)
-            if not xls:
-                raise RuntimeError("No hay ningún Excel descargado para este suministro.")
-            res, _ = ap.procesar(xls, nis, abrir=False, alertar=True, enlace_volver="index.html",
-                                 destino=CARPETA_WEB / f"perfil_{nis}.html")
-            # Copia del mes en curso en el historial (se pisa cada día hasta que cierra el mes)
-            ap.generar_html(res, CARPETA_WEB / "historial" / f"perfil_{nis}_{hoy:%Y-%m}.html", "../index.html")
-            resumenes[nis] = ap.resumen(res, f"perfil_{nis}.html")
-            if res["alerta_nueva"]:
-                alertas.append(res["alerta_nueva"])
-        except Exception as e:  # noqa: BLE001
-            errores.append(f"{nis}: {e}")
-            log(f"❌ Error con el suministro {nis}: {e}")
-            traceback.print_exc()
-
-    # Portada (con lo último que haya de cada suministro, aunque hoy haya fallado alguno)
-    ARCHIVO_RESUMENES.parent.mkdir(parents=True, exist_ok=True)
-    ARCHIVO_RESUMENES.write_text(json.dumps(resumenes, ensure_ascii=False, indent=1), encoding="utf-8")
-    vigentes = [r for n, r in resumenes.items() if n in ap.SUMINISTROS]
-    if vigentes:
-        ap.generar_indice(vigentes, CARPETA_WEB / "index.html", historial_local(), TITULO_SITIO)
-        log(f"Portada generada: {CARPETA_WEB / 'index.html'}")
-
-    if subir:
-        log("=== Subiendo a Hostinger ===")
-        try:
-            n = subir_carpeta(CARPETA_WEB, HOSTINGER["carpeta_remota"])
-            log(f"✅ {n} archivo(s) subidos a /{HOSTINGER['carpeta_remota']}")
-        except (ftplib.all_errors, socket.error, RuntimeError) as e:
-            errores.append(f"FTP: {e}")
-            log(f"❌ Error subiendo a Hostinger: {e}")
-
-    if alertas and VENTANA_ALERTA_AL_FINAL:
-        ap._ventana("Alerta de potencia - Optimum", "\n\n".join(alertas)[:3000])
-    return errores
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Orquestador diario del Perfil de Carga")
-    parser.add_argument("--configurar", action="store_true", help="guardar credenciales y probar FTP")
-    parser.add_argument("--sin-subir", action="store_true", help="no subir a Hostinger")
-    parser.add_argument("--sin-descargar", action="store_true", help="usar el último Excel ya descargado")
-    parser.add_argument("--solo-subir", action="store_true", help="solo subir reportes/web")
+    parser = argparse.ArgumentParser(description="Orquestador diario: Optimum.SM -> panel web")
+    parser.add_argument("--configurar", action="store_true", help="guardar contraseña y token, y probar la conexión")
+    parser.add_argument("--sin-subir", action="store_true", help="descargar pero no enviar al panel")
+    parser.add_argument("--sin-descargar", action="store_true", help="reenviar el último Excel ya descargado")
+    parser.add_argument("--mes", metavar="AAAA-MM", help="cargar un mes pasado completo (histórico)")
+    parser.add_argument("--nis", help="procesar solo este suministro")
+    parser.add_argument("--archivo", help="enviar un Excel descargado a mano (requiere --nis)")
     parser.add_argument("--crear-tarea", nargs="?", const="07:15", metavar="HH:MM",
-                        help="crear la tarea diaria en Windows (por defecto a las 07:15)")
+                        help="crear la tarea diaria en Windows (por defecto 07:15)")
     args = parser.parse_args()
 
     archivo_log = iniciar_log()
@@ -394,10 +404,17 @@ def main():
         if args.crear_tarea:
             crear_tarea(args.crear_tarea)
             return 0
-        if args.solo_subir:
-            subir_carpeta(CARPETA_WEB, HOSTINGER["carpeta_remota"])
+        if args.archivo:
+            if not args.nis:
+                raise SystemExit("--archivo necesita también --nis")
+            enviar(Path(args.archivo), args.nis)
             return 0
-        errores = correr(descargar_datos=not args.sin_descargar, subir=not args.sin_subir)
+        if args.mes and not (len(args.mes) == 7 and args.mes[4] == "-"):
+            raise SystemExit("--mes debe tener formato AAAA-MM, por ejemplo 2026-10")
+        errores = correr(descargar_datos=not args.sin_descargar, subir=not args.sin_subir,
+                         mes=args.mes, solo_nis=args.nis)
+    except SystemExit:
+        raise
     except Exception as e:  # noqa: BLE001
         log(f"❌ Error general: {e}")
         traceback.print_exc()

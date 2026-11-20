@@ -1,0 +1,26 @@
+Options -Indexes
+DirectoryIndex index.php
+
+# Carpetas internas: nunca se sirven directamente.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(?:app|config|pages|sql)(?:/|$) - [F,L,NC]
+    # Forzar HTTPS
+    RewriteCond %{HTTPS} !=on
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+    # Algunos hostings no pasan la cabecera Authorization a PHP: esto la conserva para la API.
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+</IfModule>
+
+<FilesMatch "^(\.env|.*\.(sql|log|ini|md))$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Header always set X-Robots-Tag "noindex, nofollow"
+</IfModule>
