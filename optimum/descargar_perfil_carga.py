@@ -284,16 +284,43 @@ def seleccionar_con_clics(page, etiqueta, texto):
         palabras = " ".join(texto.split()[:3])
         page.keyboard.type(palabras, delay=60)
 
-        candidatos = page.locator(
-            ".select2-results__option:visible, .select2-result:visible, .select2-results li:visible, "
-            ".ui-menu-item:visible, .dropdown-menu li:visible, .chosen-results li:visible, "
-            ".tt-suggestion:visible, .autocomplete-suggestion:visible"
-        ).filter(has_text=regex_flexible(texto))
-        candidatos.first.wait_for(state="visible", timeout=15_000)
-        elegido = candidatos.first.inner_text().strip()
-        candidatos.first.click()
-        page.wait_for_timeout(LENTITUD_MS * 3)
-        log(f"   {etiqueta}: {elegido}")
+        # Para reconocer la opción alcanza con la parte "fuerte" del texto
+        # (hasta el último paréntesis): "Sum Li Active Power + (QI+QIV) (last average 1)".
+        # Así no importa si al final dice "- 0", "- 0 x" o tiene otros espacios.
+        clave = texto[: texto.rfind(")") + 1] if ")" in texto else texto
+        patron = regex_flexible(clave)
+
+        estrategias = [
+            ("lista del combo", page.locator(
+                ".select2-results__option:visible, .select2-result:visible, .select2-results li:visible, "
+                ".ui-menu-item:visible, .dropdown-menu li:visible, .dropdown-item:visible, "
+                ".chosen-results li:visible, .tt-suggestion:visible, .autocomplete-suggestion:visible, "
+                "[class*='dropdown'] li:visible, [class*='token'] li:visible, [role=option]:visible"
+            ).filter(has_text=patron)),
+            ("texto visible", page.get_by_text(patron)),
+        ]
+        limite = time.time() + 15
+        while time.time() < limite:
+            for nombre, loc in estrategias:
+                for i in range(min(loc.count(), 10)):
+                    item = loc.nth(i)
+                    if not item.is_visible():
+                        continue
+                    elegido = item.inner_text().strip()
+                    # Muchos combos escuchan el clic en el <a> de adentro, no en el <li>.
+                    interno = item.locator("a:visible")
+                    (interno.first if interno.count() else item).click()
+                    page.wait_for_timeout(LENTITUD_MS * 3 + 500)
+                    log(f"   {etiqueta}: {elegido}  (por {nombre})")
+                    return True
+            page.wait_for_timeout(500)
+
+        # Último recurso: elegir la primera sugerencia con el teclado.
+        log(f"   {etiqueta}: no reconocí la opción en la lista; pruebo con flecha abajo + Enter")
+        guardar_debug(page, f"{etiqueta}_lista")
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(LENTITUD_MS * 3 + 500)
         return True
     except Exception as e:  # noqa: BLE001
         log(f"   No pude elegirlo con clics: {str(e).splitlines()[0]}")
