@@ -30,11 +30,14 @@ Si algún paso falla, se guarda en la carpeta ./debug una captura (.png) y el
 HTML de la página (.html) para poder ajustar los selectores.
 """
 
+import asyncio
 import getpass
 import os
 import re
 import sys
+import threading
 import time
+import traceback
 from datetime import date
 from pathlib import Path
 
@@ -65,6 +68,7 @@ NAVEGADOR = "chrome"   # "chrome" usa el Chrome instalado; "msedge" para Edge; N
 HEADLESS = False       # False = ves el navegador mientras trabaja (ideal para probar)
 LENTITUD_MS = 150      # pausa entre acciones (ms); subilo si la página es lenta
 TIMEOUT_MS = 30_000    # espera máxima por elemento
+PAUSA_SI_FALLA_S = 60  # si algo falla, deja el navegador abierto este tiempo para mirar
 # =============================================================================
 
 
@@ -295,16 +299,62 @@ def descargar_excel(page, nis):
     return destino
 
 
+def abrir_navegador(p):
+    """Prueba Chrome instalado, luego Edge (siempre está en Windows), luego Chromium de Playwright."""
+    canales = []
+    for c in (NAVEGADOR, "chrome", "msedge", None):
+        if c not in canales:
+            canales.append(c)
+    errores = []
+    for canal in canales:
+        opciones = {"headless": HEADLESS, "slow_mo": LENTITUD_MS}
+        if canal:
+            opciones["channel"] = canal
+        nombre = canal or "chromium (playwright)"
+        try:
+            log(f"   Abriendo navegador: {nombre}")
+            return p.chromium.launch(**opciones)
+        except Exception as e:  # noqa: BLE001
+            primera_linea = str(e).strip().splitlines()[0] if str(e).strip() else repr(e)
+            log(f"   No se pudo abrir {nombre}: {primera_linea}")
+            errores.append(f"{nombre}: {primera_linea}")
+    raise RuntimeError("No se pudo abrir ningún navegador:\n  " + "\n  ".join(errores))
+
+
+def ejecutar_en_hilo(funcion, *args):
+    """
+    Spyder / Jupyter tienen un bucle asyncio corriendo, y la API sync de Playwright
+    no funciona ahí. Ejecutarla en un hilo aparte lo evita (y también funciona
+    normal desde la consola de Windows).
+    """
+    resultado = {}
+
+    def objetivo():
+        try:
+            if sys.platform.startswith("win"):
+                # Playwright necesita el bucle Proactor en Windows para lanzar el navegador.
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            resultado["ok"] = funcion(*args)
+        except BaseException as e:  # noqa: BLE001
+            resultado["error"] = e
+            resultado["traza"] = traceback.format_exc()
+
+    hilo = threading.Thread(target=objetivo, name="playwright", daemon=True)
+    hilo.start()
+    hilo.join()
+    if "error" in resultado:
+        print(resultado["traza"], file=sys.stderr, flush=True)
+        raise resultado["error"]
+    return resultado.get("ok")
+
+
 def descargar_perfil(nis, usuario, clave):
     hoy = date.today()
     desde = hoy.replace(day=1).isoformat()
     hasta = hoy.isoformat()
 
     with sync_playwright() as p:
-        opciones = {"headless": HEADLESS, "slow_mo": LENTITUD_MS}
-        if NAVEGADOR:
-            opciones["channel"] = NAVEGADOR
-        navegador = p.chromium.launch(**opciones)
+        navegador = abrir_navegador(p)
         contexto = navegador.new_context(accept_downloads=True, viewport={"width": 1600, "height": 900})
         page = contexto.new_page()
         page.set_default_timeout(TIMEOUT_MS)
@@ -335,8 +385,9 @@ def descargar_perfil(nis, usuario, clave):
         except Exception as e:
             log(f"ERROR en el paso '{paso}': {e}")
             guardar_debug(page, paso)
-            if not HEADLESS:
-                input("Revisá el navegador. Presioná Enter para cerrar...")
+            if not HEADLESS and PAUSA_SI_FALLA_S:
+                log(f"   El navegador queda abierto {PAUSA_SI_FALLA_S} s para que lo revises...")
+                page.wait_for_timeout(PAUSA_SI_FALLA_S * 1000)
             raise
         finally:
             contexto.close()
@@ -346,8 +397,9 @@ def descargar_perfil(nis, usuario, clave):
 def main():
     usuario = USUARIO
     clave = os.environ.get("OPTIMUM_PASS") or getpass.getpass("Contraseña Optimum: ")
-    nis = sys.argv[1] if len(sys.argv) > 1 else PUNTO_DE_MEDIDA
-    archivo = descargar_perfil(nis, usuario, clave)
+    nis = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].strip() else PUNTO_DE_MEDIDA
+    log(f"Iniciando descarga para el Punto de Medida {nis}")
+    archivo = ejecutar_en_hilo(descargar_perfil, nis, usuario, clave)
     log(f"Listo: {archivo}")
 
 
