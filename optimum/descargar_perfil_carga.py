@@ -63,6 +63,7 @@ CLAVE_CREDENCIAL = "optimum"
 OLVIDAR_CLAVE = False                # True = borra la guardada y la vuelve a pedir
 
 BASE_URL = "http://10.1.0.126/optimum"
+ORIGEN_SITIO = re.match(r"https?://[^/]+", BASE_URL).group(0)
 SERVIDOR = "LOCAL (LOCAL)"           # combo del login
 EMPRESA = "ANDE"                     # último campo del login
 
@@ -80,6 +81,9 @@ HEADLESS = False       # False = ves el navegador mientras trabaja (ideal para p
 LENTITUD_MS = 150      # pausa entre acciones (ms); subilo si la página es lenta
 TIMEOUT_MS = 30_000    # espera máxima por elemento
 PAUSA_SI_FALLA_S = 60  # si algo falla, deja el navegador abierto este tiempo para mirar
+ESPERA_ANTES_DE_ABRIR_COMBO_S = 6   # si un combo no trae la opción, a los N s se abre con clics
+ESPERA_TABLA_S = 180   # máximo para que la tabla termine de cargar tras "Aplicar"
+ESPERA_DESCARGA_S = 180  # máximo para que el Excel termine de descargarse
 # =============================================================================
 
 
@@ -90,6 +94,16 @@ def log(msg):
 def normalizar(texto):
     """Minúsculas y espacios colapsados, para comparar textos de opciones."""
     return re.sub(r"\s+", " ", (texto or "")).strip().lower()
+
+
+def compacto(texto):
+    """Sin espacios y en minúsculas: 'Power + (QI+QIV) (last average 1)- 0 x' == 'Power+(QI+QIV)(lastaverage1)-0x'."""
+    return re.sub(r"\s+", "", (texto or "")).lower()
+
+
+def regex_flexible(texto):
+    """Regex que acepta el texto con cualquier cantidad de espacios entre caracteres."""
+    return re.compile(r"\s*".join(re.escape(c) for c in compacto(texto)), re.I)
 
 
 def guardar_debug(page, nombre):
@@ -183,7 +197,7 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
     """
     sel = control_despues_de(page, etiqueta, "select")
     sel.wait_for(state="attached", timeout=TIMEOUT_MS)
-    objetivo = normalizar(texto)
+    objetivo = compacto(texto)
     ident = sel.evaluate("el => `${el.id || '-'} / ${el.name || '-'}`")
 
     def opciones():
@@ -192,7 +206,7 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
 
     def buscar():
         for v, t in opciones():
-            n = normalizar(t)
+            n = compacto(t)
             if (modo == "exacto" and n == objetivo) or \
                (modo == "empieza" and n.startswith(objetivo)) or \
                (modo == "contiene" and objetivo in n):
@@ -200,11 +214,22 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
         return None, None
 
     # Las opciones pueden cargarse por AJAX: reintentamos hasta TIMEOUT_MS.
-    limite = time.time() + TIMEOUT_MS / 1000
+    # Si a los pocos segundos el <select> sigue sin la opción, probablemente el
+    # combo carga sus opciones recién al abrirlo (select2 con AJAX, como Canal):
+    # en ese caso lo abrimos y elegimos con clics, como lo haría una persona.
+    inicio = time.time()
+    limite = inicio + TIMEOUT_MS / 1000
+    probado_ui = False
     valor, visible = buscar()
     while valor is None and time.time() < limite:
+        if not probado_ui and time.time() - inicio > ESPERA_ANTES_DE_ABRIR_COMBO_S:
+            probado_ui = True
+            if seleccionar_con_clics(page, etiqueta, texto):
+                return
         time.sleep(0.5)
         valor, visible = buscar()
+    if valor is None and not probado_ui and seleccionar_con_clics(page, etiqueta, texto):
+        return
     if valor is None:
         lista = [t for _, t in opciones()]
         raise RuntimeError(f"No encontré '{texto}' en '{etiqueta}' (select {ident}). Opciones: {lista}")
@@ -223,6 +248,57 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
         )
     log(f"   {etiqueta}: {visible}")
     page.wait_for_timeout(LENTITUD_MS * 3)
+
+
+def etiqueta_visible(page, etiqueta):
+    etiquetas = page.locator(f"xpath={_xpath_etiqueta(etiqueta)}")
+    for i in range(etiquetas.count()):
+        if etiquetas.nth(i).is_visible():
+            return etiquetas.nth(i)
+    return etiquetas.first
+
+
+def seleccionar_con_clics(page, etiqueta, texto):
+    """Abre el combo visible que está tras la etiqueta, busca el texto y hace clic en el resultado."""
+    log(f"   {etiqueta}: el combo no trae la opción cargada; lo abro y la busco con clics...")
+    try:
+        etq = etiqueta_visible(page, etiqueta)
+        posibles = etq.locator(
+            "xpath=following::*[contains(concat(' ', normalize-space(@class), ' '), ' select2-selection ')"
+            " or contains(concat(' ', normalize-space(@class), ' '), ' select2-choices ')"
+            " or contains(concat(' ', normalize-space(@class), ' '), ' select2-choice ')"
+            " or (self::input and not(@type='hidden') and not(@type='checkbox'))"
+            " or self::select]"
+        )
+        widget = None
+        for i in range(min(posibles.count(), 6)):   # el primero VISIBLE tras la etiqueta
+            if posibles.nth(i).is_visible():
+                widget = posibles.nth(i)
+                break
+        if widget is None:
+            raise RuntimeError("no encontré el combo visible")
+        widget.click()
+        page.wait_for_timeout(500)
+
+        # Escribimos las primeras palabras para filtrar (si el combo tiene buscador).
+        palabras = " ".join(texto.split()[:3])
+        page.keyboard.type(palabras, delay=60)
+
+        candidatos = page.locator(
+            ".select2-results__option:visible, .select2-result:visible, .select2-results li:visible, "
+            ".ui-menu-item:visible, .dropdown-menu li:visible, .chosen-results li:visible, "
+            ".tt-suggestion:visible, .autocomplete-suggestion:visible"
+        ).filter(has_text=regex_flexible(texto))
+        candidatos.first.wait_for(state="visible", timeout=15_000)
+        elegido = candidatos.first.inner_text().strip()
+        candidatos.first.click()
+        page.wait_for_timeout(LENTITUD_MS * 3)
+        log(f"   {etiqueta}: {elegido}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"   No pude elegirlo con clics: {str(e).splitlines()[0]}")
+        page.keyboard.press("Escape")
+        return False
 
 
 def poner_fecha(page, etiqueta, valor_iso):
@@ -386,7 +462,7 @@ def descargar_excel(page, nis):
         '[onclick*="xls" i]:visible, [onclick*="excel" i]:visible',
     ]
     excel = None
-    limite = time.time() + TIMEOUT_MS * 2 / 1000   # la tabla puede tardar en cargar
+    limite = time.time() + ESPERA_TABLA_S   # la tabla puede tardar en cargar
     while excel is None and time.time() < limite:
         for css in selectores:
             loc = page.locator(css)
@@ -399,17 +475,36 @@ def descargar_excel(page, nis):
     if excel is None:
         raise RuntimeError("No encontré el botón de Exportar / Excel.")
 
-    with page.expect_download(timeout=TIMEOUT_MS * 4) as info:
-        excel.click()
-    descarga = info.value
+    # Las descargas se capturan aunque salgan de una pestaña nueva, y los avisos
+    # tipo "¿Desea descargar...?" se aceptan solos (ver descargar_perfil).
+    recibidas = page.context._descargas_recibidas
+    recibidas.clear()
+    excel.click()
+
+    limite = time.time() + ESPERA_DESCARGA_S
+    while not recibidas and time.time() < limite:
+        page.wait_for_timeout(500)
+    if not recibidas:
+        raise RuntimeError(f"Hice clic en Excel pero no llegó ninguna descarga en {ESPERA_DESCARGA_S} s.")
+    page.wait_for_timeout(3000)   # por si el sitio dispara más de un archivo
 
     CARPETA_DESCARGAS.mkdir(parents=True, exist_ok=True)
-    original = descarga.suggested_filename or "perfil.xlsx"
-    extension = Path(original).suffix or ".xlsx"
-    destino = CARPETA_DESCARGAS / f"perfil_{nis}_{date.today():%Y%m%d}{extension}"
-    descarga.save_as(str(destino))
-    log(f"   Guardado en: {destino}")
-    return destino
+    guardados = []
+    for i, descarga in enumerate(list(recibidas), start=1):
+        original = descarga.suggested_filename or "perfil.xlsx"
+        extension = Path(original).suffix or ".xlsx"
+        sufijo = "" if i == 1 else f"_{i}"
+        destino = CARPETA_DESCARGAS / f"perfil_{nis}_{date.today():%Y%m%d}{sufijo}{extension}"
+        falla = descarga.failure()   # espera a que termine; None = OK
+        if falla:
+            log(f"   La descarga '{original}' falló: {falla}")
+            continue
+        descarga.save_as(str(destino))
+        log(f"   Guardado en: {destino}  (nombre original: {original})")
+        guardados.append(destino)
+    if not guardados:
+        raise RuntimeError("La descarga del Excel falló (ver mensajes arriba).")
+    return guardados[0]
 
 
 def abrir_navegador(p):
@@ -421,6 +516,12 @@ def abrir_navegador(p):
     errores = []
     for canal in canales:
         opciones = {"headless": HEADLESS, "slow_mo": LENTITUD_MS}
+        opciones["args"] = [
+            # El sitio es http:// y Chrome frena las descargas "no seguras" (la flechita
+            # de arriba a la derecha que había que tocar). Así las deja pasar directo.
+            f"--unsafely-treat-insecure-origin-as-secure={ORIGEN_SITIO}",
+            "--disable-features=InsecureDownloadWarnings,DownloadBubble,DownloadBubbleV2",
+        ]
         if canal:
             opciones["channel"] = canal
         nombre = canal or "chromium (playwright)"
@@ -469,7 +570,22 @@ def descargar_perfil(nis, usuario, clave):
     with sync_playwright() as p:
         navegador = abrir_navegador(p)
         contexto = navegador.new_context(accept_downloads=True, viewport={"width": 1600, "height": 900})
+
+        # Capturar descargas de cualquier pestaña y aceptar avisos JS (confirm/alert).
+        contexto._descargas_recibidas = []
+
+        def vigilar(pg):
+            if getattr(pg, "_vigilada", False):
+                return
+            pg._vigilada = True
+            pg.on("download", lambda d: (log(f"   Descarga iniciada: {d.suggested_filename}"),
+                                         contexto._descargas_recibidas.append(d)))
+            pg.on("dialog", lambda dlg: (log(f"   Aviso del sitio aceptado: {dlg.message[:80]}"),
+                                         dlg.accept()))
+
+        contexto.on("page", vigilar)
         page = contexto.new_page()
+        vigilar(page)
         page.set_default_timeout(TIMEOUT_MS)
 
         paso = "inicio"
