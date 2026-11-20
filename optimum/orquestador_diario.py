@@ -55,7 +55,7 @@ import descargar_perfil_carga as dp   # noqa: E402  (automatización de Optimum)
 # CONFIGURACIÓN
 # =============================================================================
 WEB = {
-    "url_base": "https://tudominio.com",   # dirección del panel, sin barra final
+    "url_base": "https://velilla.monitorkw.com",   # dirección del panel, sin barra final
     # El token de la API se guarda en el Administrador de credenciales de Windows:
     "servicio_credencial": "Automatismo_Telemedicion",
     "clave_credencial": "potencia_api_token",
