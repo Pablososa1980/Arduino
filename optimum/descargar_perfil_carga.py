@@ -23,8 +23,8 @@ Requisitos (una sola vez):
 Uso:
     python descargar_perfil_carga.py
 
-Credenciales: se leen de las variables de entorno OPTIMUM_USER / OPTIMUM_PASS.
-Si no existen, el script te las pide por consola (la contraseña no se muestra).
+Credenciales: el usuario se configura en USUARIO (abajo). La contraseña se lee
+de la variable de entorno OPTIMUM_PASS; si no existe, se pide por consola.
 
 Si algún paso falla, se guarda en la carpeta ./debug una captura (.png) y el
 HTML de la página (.html) para poder ajustar los selectores.
@@ -45,6 +45,8 @@ from playwright.sync_api import sync_playwright
 # CONFIGURACIÓN — editá esto
 # =============================================================================
 PUNTO_DE_MEDIDA = "1234567"          # <-- poné acá el NIS a probar
+
+USUARIO = "asu06419"                 # usuario de Optimum (la contraseña se pide al ejecutar)
 
 BASE_URL = "http://10.1.0.126/optimum"
 SERVIDOR = "LOCAL (LOCAL)"           # combo del login
@@ -342,7 +344,7 @@ def descargar_perfil(nis, usuario, clave):
 
 
 def main():
-    usuario = os.environ.get("OPTIMUM_USER") or input("Usuario Optimum: ").strip()
+    usuario = USUARIO
     clave = os.environ.get("OPTIMUM_PASS") or getpass.getpass("Contraseña Optimum: ")
     nis = sys.argv[1] if len(sys.argv) > 1 else PUNTO_DE_MEDIDA
     archivo = descargar_perfil(nis, usuario, clave)
