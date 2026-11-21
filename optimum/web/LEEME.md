@@ -1,21 +1,34 @@
 # Panel de Potencia — instalación en Hostinger
 
 Panel web en PHP 8 + MySQL (sin frameworks ni librerías externas, sin CDN), pensado para
-un plan compartido de Hostinger. Está armado sobre la misma base del panel SEP2.
+un plan compartido de Hostinger.
 
 ## Qué hace
 
 - **Usuarios y roles**
   - **Administrador:** ve todo y administra usuarios, suministros y tokens.
   - **Consulta:** solo ve los suministros que se le asignan y, si se le habilita, descarga el Excel.
-- **Suministros:** se agregan desde el panel, con su NIS, nombre, prefijo del medidor y canal de Optimum. El script diario los toma solo.
+- **Suministros:** se agregan desde el panel, con su NIS, nombre, prefijo del medidor, canal del MDC y **día de cierre de facturación**. El script diario los toma solo.
 - **Condiciones contractuales con vigencia:** factor, potencia contratada y tolerancia, con fecha "vigente desde". Si cambian, se agrega una condición nueva: los meses anteriores se siguen evaluando con la de su momento, y todo el histórico se recalcula solo.
 - **Histórico:** se guardan las lecturas de 15 minutos en crudo (W). Con eso hay resumen mensual, detalle de cualquier mes, máximos diarios y excesos.
 - **Alertas:** cada intervalo por encima de contratada × (1 + tolerancia) queda registrado y se avisa por correo una sola vez a los usuarios marcados con "Recibir alertas" que pueden ver ese suministro.
 - **Auditoría:** ingresos, cambios, descargas y envíos del script.
 - **API con token**, usada por `orquestador_diario.py`:
   - `GET api/supplies.php`: lista de suministros activos.
-  - `POST api/readings-import.php`: lecturas en formato `optimum-readings-v1`. Es idempotente: reenviar el mismo período no duplica nada.
+  - `POST api/readings-import.php`: lecturas en formato `mdc-readings-v1`. Es idempotente: reenviar el mismo período no duplica nada.
+
+## Ciclos de facturación
+
+Cada suministro puede tener un **día de cierre** (1 a 31). El panel agrupa todo por ciclo de facturación: máximos, energía, histórico, alertas y Excel.
+
+- El ciclo se nombra por el mes en que cierra.
+- El día de cierre se incluye en el ciclo. Por ejemplo, con cierre 15, el "ciclo noviembre" va del 16/10 al 15/11.
+- **Sin día de cierre**, el ciclo es el mes calendario: del 1 al último día.
+- **Meses cortos:** si el mes no tiene el día de cierre (por ejemplo, 31 en noviembre), cierra el último día de ese mes.
+- **Cambiar el día de cierre** recalcula todo el histórico; no hace falta volver a descargar nada.
+- **Cambios de condición contractual:** conviene que la fecha "vigente desde" sea el día siguiente a un cierre. Así un mismo ciclo no mezcla dos potencias contratadas. Cada lectura igual se evalúa con la condición de su fecha.
+
+**Actualización de un panel ya instalado:** antes de subir los archivos nuevos, ejecutá una vez `sql/migracion_ciclo_facturacion.sql` en phpMyAdmin, en la pestaña SQL. Solo agrega columnas, no borra datos.
 
 ## Instalación (una sola vez)
 

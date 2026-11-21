@@ -1,5 +1,5 @@
 -- =============================================================================
--- Panel de Potencia (Optimum.SM) — esquema MySQL / MariaDB
+-- Panel de Potencia — esquema MySQL / MariaDB
 -- Ejecutar UNA vez en phpMyAdmin sobre la base vacía del sitio.
 -- =============================================================================
 SET NAMES utf8mb4;
@@ -21,15 +21,16 @@ CREATE TABLE users (
     UNIQUE KEY uq_users_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Suministros (puntos de medida de Optimum). Se agregan desde el panel.
+-- Suministros (puntos de medida del MDC). Se agregan desde el panel.
 CREATE TABLE supplies (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    nis             VARCHAR(20)  NOT NULL,                 -- Punto de Medida en Optimum
+    nis             VARCHAR(20)  NOT NULL,                 -- Punto de Medida en el MDC
     name            VARCHAR(150) NOT NULL,
     client          VARCHAR(150) NULL,
     meter_prefix    VARCHAR(20)  NOT NULL DEFAULT 'EGM',   -- el medidor a elegir empieza con esto
     channel         VARCHAR(190) NOT NULL DEFAULT 'Sum Li Active Power + (QI+QIV) (last average 1)- 0 x',
     meter_serial    VARCHAR(40)  NULL,                     -- se completa solo con la primera importación
+    billing_day     TINYINT UNSIGNED NULL,                 -- día de cierre de facturación (1..31); NULL = mes calendario
     active          TINYINT(1)   NOT NULL DEFAULT 1,       -- inactivo = el script deja de descargarlo
     notes           TEXT         NULL,
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -64,7 +65,7 @@ CREATE TABLE user_supply_permissions (
     CONSTRAINT fk_perm_supply FOREIGN KEY (supply_id) REFERENCES supplies(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Lecturas de 15 minutos tal cual vienen de Optimum (valor secundario en W).
+-- Lecturas de 15 minutos tal cual vienen del MDC (valor secundario en W).
 -- Los kW se calculan aplicando el factor vigente: así, si se corrige un factor,
 -- todo el histórico se recalcula sin volver a descargar nada.
 CREATE TABLE readings (
@@ -76,11 +77,14 @@ CREATE TABLE readings (
     CONSTRAINT fk_reading_supply FOREIGN KEY (supply_id) REFERENCES supplies(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Resumen por suministro y mes (lo usan la portada y el histórico).
+-- Resumen por suministro y ciclo de facturación (lo usan la portada y el histórico).
+-- period = mes en que cierra el ciclo; sin día de cierre, el ciclo es el mes calendario.
 -- Se recalcula solo en cada importación y cuando cambia un contrato.
 CREATE TABLE monthly_summaries (
     supply_id           INT UNSIGNED NOT NULL,
-    period              CHAR(7)      NOT NULL,             -- AAAA-MM
+    period              CHAR(7)      NOT NULL,             -- AAAA-MM (mes de cierre del ciclo)
+    period_start        DATE         NULL,                 -- primer día del ciclo
+    period_end          DATE         NULL,                 -- día de cierre (incluido)
     first_ts            DATETIME     NULL,
     last_ts             DATETIME     NULL,
     readings_count      INT UNSIGNED NOT NULL DEFAULT 0,

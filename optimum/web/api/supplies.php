@@ -7,6 +7,7 @@ declare(strict_types=1);
  * Agregar un suministro en el panel alcanza: el script lo toma solo al día siguiente.
  */
 require __DIR__ . '/../app/api.php';
+require __DIR__ . '/../app/metrics.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     header('Allow: GET');
@@ -15,7 +16,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 api_token();
 
 $filas = db()->query(
-    "SELECT s.nis, s.name, s.meter_prefix, s.channel,
+    "SELECT s.nis, s.name, s.meter_prefix, s.channel, s.billing_day,
             (SELECT MAX(r.ts) FROM readings r WHERE r.supply_id = s.id) AS last_reading,
             (SELECT COUNT(*) FROM supply_contracts c WHERE c.supply_id = s.id) AS contracts
      FROM supplies s WHERE s.active = 1 ORDER BY s.nis"
@@ -28,6 +29,9 @@ foreach ($filas as $f) {
         'name' => $f['name'],
         'meter_prefix' => $f['meter_prefix'],
         'channel' => $f['channel'],
+        'billing_day' => $f['billing_day'] === null ? null : (int) $f['billing_day'],
+        // Primer día del ciclo de facturación en curso: el script descarga desde ahí (o desde el 1° del mes, lo que sea antes).
+        'cycle_start' => cycle_bounds($f['billing_day'] === null ? null : (int) $f['billing_day'], period_of($f['billing_day'] === null ? null : (int) $f['billing_day'], date('Y-m-d')))[0],
         'last_reading' => $f['last_reading'],
         'ready' => (int) $f['contracts'] > 0,   // sin contrato cargado no se puede importar
     ];

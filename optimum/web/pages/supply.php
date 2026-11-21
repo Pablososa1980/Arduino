@@ -13,12 +13,13 @@ if (!Auth::canSupply($id)) {
     forbidden();
 }
 
+$billing = $s['billing_day'] === null ? null : (int) $s['billing_day'];
 $periodos = db()->prepare('SELECT period FROM monthly_summaries WHERE supply_id = ? ORDER BY period DESC');
 $periodos->execute([$id]);
 $periodos = $periodos->fetchAll(PDO::FETCH_COLUMN);
 $period = is_string($_GET['period'] ?? null) && preg_match('/^\d{4}-\d{2}$/', $_GET['period']) ? $_GET['period'] : ($periodos[0] ?? null);
 if ($period !== null && $periodos && !in_array($period, $periodos, true)) {
-    not_found('No hay datos de ' . mes_texto($period) . ' para este suministro.');
+    not_found('No hay datos ' . period_phrase($billing, $period) . ' para este suministro.');
 }
 
 $r = null;
@@ -36,7 +37,7 @@ $excesos = [];
 $top = [];
 if ($period) {
     $q = db()->prepare('SELECT * FROM alerts WHERE supply_id = ? AND ts >= ? AND ts < ? ORDER BY ts');
-    $q->execute([$id, $period . '-01', (new DateTimeImmutable($period . '-01'))->modify('+1 month')->format('Y-m-d')]);
+    $q->execute([$id, ...cycle_range($billing, $period)]);
     $excesos = $q->fetchAll();
     $validos = array_values(array_filter($serie, static fn ($p) => $p['kw'] !== null));
     usort($validos, static fn ($a, $b) => $b['kw'] <=> $a['kw']);
@@ -54,6 +55,7 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
     <h1><?= e($s['name']) ?> · NIS <?= e($s['nis']) ?></h1>
     <div class="muted small">
       <?= $s['client'] ? e($s['client']) . ' · ' : '' ?>Medidor <?= e($s['meter_serial'] ?: '—') ?>
+      · <?= $billing ? 'Cierre día ' . $billing : 'Mes calendario' ?>
       <?php if ($r): ?> · Factor <?= num(contract_for($contratos, substr((string) $r['last_ts'], 0, 10))['factor'] ?? null, 2) ?>
       · Contratada <b><?= num($r['contracted_kw']) ?> kW</b> · Tolerancia <b><?= num($r['tolerance_pct']) ?> %</b> (límite <b><?= num($r['limit_kw']) ?> kW</b>)<?php endif; ?>
     </div>
@@ -62,8 +64,8 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
     <?php if ($periodos): ?>
     <form method="get" class="inline-form">
       <input type="hidden" name="page" value="supply"><input type="hidden" name="id" value="<?= $id ?>">
-      <label>Período <select name="period" onchange="this.form.submit()">
-        <?php foreach ($periodos as $p): ?><option value="<?= e($p) ?>"<?= $p === $period ? ' selected' : '' ?>><?= e(ucfirst(mes_texto($p))) ?></option><?php endforeach; ?>
+      <label><?= $billing ? 'Ciclo de facturación' : 'Período' ?> <select name="period" onchange="this.form.submit()">
+        <?php foreach ($periodos as $p): ?><option value="<?= e($p) ?>"<?= $p === $period ? ' selected' : '' ?>><?= e(ucfirst(period_label($billing, $p))) ?></option><?php endforeach; ?>
       </select></label>
       <noscript><button class="button small">Ver</button></noscript>
     </form>
@@ -79,7 +81,7 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
   <section class="card"><h2>Sin lecturas todavía</h2><p class="muted">Cuando el script diario envíe datos de este suministro, aparecen acá.</p></section>
 <?php else:
   $msg = [
-      'normal' => 'La demanda máxima de ' . mes_texto($period) . ' (' . num($r['max_kw']) . ' kW) está por debajo de la potencia contratada. Margen hasta el límite: ' . num($margen) . ' kW.',
+      'normal' => 'La demanda máxima ' . period_phrase($billing, $period) . ' (' . num($r['max_kw']) . ' kW) está por debajo de la potencia contratada. Margen hasta el límite: ' . num($margen) . ' kW.',
       'atencion' => 'La demanda superó la contratada en ' . (int) $r['over_contract_count'] . ' intervalo(s), sin pasar el límite de tolerancia (' . num($r['limit_kw']) . ' kW).',
       'critico' => 'Se superó el límite de tolerancia en ' . (int) $r['over_limit_count'] . ' intervalo(s). Máximo: ' . num($r['max_kw']) . ' kW (' . num((float) $r['max_kw'] / (float) $r['contracted_kw'] * 100, 1) . ' % de la contratada).',
       'sin_datos' => 'Sin lecturas válidas en el período.',
@@ -107,7 +109,7 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
     <h2>Curva de carga</h2>
     <div class="nota">Demanda en kW cada 15 minutos (valor del medidor × factor). Los huecos sin lectura quedan cortados.</div>
     <div class="rango" id="rango">
-      <button type="button" data-r="todo" aria-pressed="true">Todo el mes</button>
+      <button type="button" data-r="todo" aria-pressed="true"><?= $billing ? 'Todo el ciclo' : 'Todo el mes' ?></button>
       <button type="button" data-r="7" aria-pressed="false">Últimos 7 días</button>
       <button type="button" data-r="2" aria-pressed="false">Últimas 48 h</button>
     </div>
@@ -151,6 +153,6 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
       'tolerancia' => (float) $r['tolerance_pct'],
       'diario' => json_decode((string) $r['daily_json'], true) ?: [],
   ]) ?>
-  <script src="assets/charts.js?v=2"></script>
+  <script src="assets/charts.js?v=3"></script>
 <?php endif; ?>
 <?php render_footer();

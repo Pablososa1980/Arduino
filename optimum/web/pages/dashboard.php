@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/* Portada: una tarjeta por suministro visible, con el mes más reciente. */
+/* Portada: una tarjeta por suministro visible, con su ciclo de facturación más reciente. */
 $supplies = Auth::supplies();
 $resumenes = [];
 if ($supplies) {
@@ -27,7 +27,7 @@ $ultimaImportacion = db()->query('SELECT MAX(created_at) FROM import_runs')->fet
 render_header('Inicio', 'dashboard');
 ?>
 <div class="page-head">
-  <div><h1>Suministros</h1><div class="muted">Demanda máxima del mes comparada con la potencia contratada y su tolerancia.</div></div>
+  <div><h1>Suministros</h1><div class="muted">Demanda máxima del ciclo de facturación en curso, comparada con la potencia contratada y su tolerancia.</div></div>
   <div class="muted small">Última actualización de datos: <?= e(fecha_hora($ultimaImportacion ?: null)) ?></div>
 </div>
 
@@ -43,7 +43,7 @@ render_header('Inicio', 'dashboard');
   </section>
 <?php else: ?>
   <?php if ($criticos): ?>
-    <div class="estado critical"><div><strong><?= $criticos ?> suministro(s) superan la tolerancia este mes</strong><span>Revisá el detalle de los marcados en rojo.</span></div></div>
+    <div class="estado critical"><div><strong><?= $criticos ?> suministro(s) superan la tolerancia en el ciclo actual</strong><span>Revisá el detalle de los marcados en rojo.</span></div></div>
   <?php elseif ($resumenes): ?>
     <div class="estado good"><div><strong>Todos los suministros dentro de la tolerancia</strong><span><?= count($supplies) ?> suministro(s) monitoreado(s).</span></div></div>
   <?php endif; ?>
@@ -63,14 +63,14 @@ render_header('Inicio', 'dashboard');
       </div>
       <?php if ($r): ?>
         <div class="fila">
-          <div><div class="muted small">Demanda máxima · <?= e(mes_texto($r['period'])) ?></div>
+          <div><div class="muted small">Demanda máxima · <?= e(period_label($s['billing_day'] === null ? null : (int) $s['billing_day'], $r['period'], true)) ?></div>
             <div class="v"><?= num($r['max_kw']) ?><small>kW</small></div>
             <div class="muted small"><?= $r['contracted_kw'] ? num((float) $r['max_kw'] / (float) $r['contracted_kw'] * 100, 1) . ' % de la contratada' : '' ?></div></div>
           <div><div class="muted small">Contratada / límite</div>
             <div class="v"><?= num($r['contracted_kw']) ?><small>/ <?= num($r['limit_kw']) ?> kW</small></div>
             <div class="muted small">Tolerancia <?= num($r['tolerance_pct']) ?> %</div></div>
         </div>
-        <div class="muted small">Máximos diarios</div>
+        <div class="muted small">Máximos diarios del ciclo</div>
         <?= mini_barras($diario, $r['limit_kw'] !== null ? (float) $r['limit_kw'] : null, $r['contracted_kw'] !== null ? (float) $r['contracted_kw'] : null) ?>
         <div class="small"><?php if ($margen !== null && $margen >= 0): ?>Margen hasta el límite: <b><?= num($margen) ?> kW</b>
           <?php elseif ($margen !== null): ?><b style="color:var(--critical-text)">Excede el límite en <?= num(-$margen) ?> kW</b><?php endif; ?>

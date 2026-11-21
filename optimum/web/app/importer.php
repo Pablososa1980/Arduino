@@ -4,10 +4,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/metrics.php';
 
 /**
- * Importa un paquete "optimum-readings-v1" que manda el orquestador:
+ * Importa un paquete "mdc-readings-v1" que manda el orquestador:
  *
  *   {
- *     "format": "optimum-readings-v1",
+ *     "format": "mdc-readings-v1",
  *     "nis": "1379190",
  *     "period_start": "2026-11-01", "period_end": "2026-11-20",
  *     "unit": "W", "meter": "EGM4026367", "channel": "...", "source_file": "...",
@@ -21,8 +21,9 @@ require_once __DIR__ . '/metrics.php';
  */
 function import_readings_payload(array $payload, ?int $tokenId = null): array
 {
-    if (($payload['format'] ?? '') !== 'optimum-readings-v1') {
-        throw new InvalidArgumentException('Formato de paquete no compatible (se espera optimum-readings-v1).');
+    // "optimum-readings-v1" es el nombre anterior del mismo formato: se sigue aceptando.
+    if (!in_array($payload['format'] ?? '', ['mdc-readings-v1', 'optimum-readings-v1'], true)) {
+        throw new InvalidArgumentException('Formato de paquete no compatible (se espera mdc-readings-v1).');
     }
     $nis = trim((string) ($payload['nis'] ?? ''));
     if ($nis === '') {
@@ -55,6 +56,7 @@ function import_readings_payload(array $payload, ?int $tokenId = null): array
         throw new InvalidArgumentException("El NIS {$nis} no está dado de alta en el panel.");
     }
     $supplyId = (int) $supply['id'];
+    $billing = $supply['billing_day'] === null ? null : (int) $supply['billing_day'];
     if (!supply_contracts($supplyId)) {
         throw new InvalidArgumentException("El NIS {$nis} no tiene cargada la potencia contratada / factor.");
     }
@@ -76,7 +78,7 @@ function import_readings_payload(array $payload, ?int $tokenId = null): array
         }
         $estado = substr(trim((string) ($r[2] ?? '')), 0, 30);
         $filas[] = [$ts->format('Y-m-d H:i:00'), $valor === null ? null : (float) $valor * $aW, $estado];
-        $periodos[$ts->format('Y-m')] = true;
+        $periodos[period_of($billing, $ts->format('Y-m-d'))] = true;
     }
 
     $tsMin = min(array_column($filas, 0));
@@ -111,6 +113,7 @@ function import_readings_payload(array $payload, ?int $tokenId = null): array
         }
 
         $resumenes = [];
+        ksort($periodos);
         foreach (array_keys($periodos) as $period) {
             $resumenes[$period] = recompute_month($supplyId, $period);
         }

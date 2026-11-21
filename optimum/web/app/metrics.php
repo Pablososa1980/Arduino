@@ -12,6 +12,71 @@ declare(strict_types=1);
 
 const INTERVAL_HOURS = 0.25;   // lecturas de 15 minutos
 
+/*
+ * Ciclos de facturación. Cada suministro tiene un día de cierre fijo (1..31).
+ * El ciclo se identifica con el mes en que CIERRA (AAAA-MM) e incluye el día de
+ * cierre completo. Ej.: cierre 15 → ciclo "2026-11" = 16/10/2026 a 15/11/2026.
+ * Sin día de cierre (NULL) = mes calendario, que es lo mismo que cerrar el último día.
+ * Si el mes no tiene ese día (cierre 31 en noviembre) se usa el último día del mes.
+ */
+function cierre_efectivo(?int $billingDay, int $anio, int $mes): int
+{
+    $ultimo = (int) (new DateTimeImmutable(sprintf('%04d-%02d-01', $anio, $mes)))->format('t');
+    return min($billingDay ?: 31, $ultimo);
+}
+
+/** @return array{0:string,1:string} [fecha inicio, fecha fin] del ciclo (AAAA-MM-DD, ambas incluidas). */
+function cycle_bounds(?int $billingDay, string $period): array
+{
+    [$a, $m] = array_map('intval', explode('-', $period));
+    $fin = new DateTimeImmutable(sprintf('%04d-%02d-%02d', $a, $m, cierre_efectivo($billingDay, $a, $m)));
+    $ant = (new DateTimeImmutable(sprintf('%04d-%02d-01', $a, $m)))->modify('-1 month');
+    $finAnterior = new DateTimeImmutable(sprintf('%s-%02d', $ant->format('Y-m'),
+        cierre_efectivo($billingDay, (int) $ant->format('Y'), (int) $ant->format('m'))));
+    return [$finAnterior->modify('+1 day')->format('Y-m-d'), $fin->format('Y-m-d')];
+}
+
+/** Ciclo (AAAA-MM) al que pertenece una fecha o fecha-hora. */
+function period_of(?int $billingDay, string $fecha): string
+{
+    $d = new DateTimeImmutable(substr($fecha, 0, 10));
+    $cierre = cierre_efectivo($billingDay, (int) $d->format('Y'), (int) $d->format('m'));
+    return (int) $d->format('j') <= $cierre ? $d->format('Y-m') : $d->modify('first day of next month')->format('Y-m');
+}
+
+/** Rango SQL [desde, hasta) de un ciclo, para filtrar por ts. */
+function cycle_range(?int $billingDay, string $period): array
+{
+    [$ini, $fin] = cycle_bounds($billingDay, $period);
+    return [$ini . ' 00:00:00', (new DateTimeImmutable($fin))->modify('+1 day')->format('Y-m-d') . ' 00:00:00'];
+}
+
+function supply_billing_day(int $supplyId): ?int
+{
+    // Sin caché a propósito: si se cambia el día de cierre, el recálculo tiene que ver el valor nuevo.
+    $q = db()->prepare('SELECT billing_day FROM supplies WHERE id = ?');
+    $q->execute([$supplyId]);
+    $v = $q->fetchColumn();
+    return ($v === false || $v === null) ? null : (int) $v;
+}
+
+/** "del ciclo noviembre 2026 (16/10 – 15/11)" o "de noviembre 2026", para usar dentro de una frase. */
+function period_phrase(?int $billingDay, string $period): string
+{
+    return ($billingDay && $billingDay < 31 ? 'del ' : 'de ') . period_label($billingDay, $period);
+}
+
+/** "Ciclo nov 2026 (16/10 – 15/11)" o "noviembre 2026" si es mes calendario. */
+function period_label(?int $billingDay, string $period, bool $corto = false): string
+{
+    if (!$billingDay || $billingDay >= 31) {
+        return mes_texto($period);
+    }
+    [$ini, $fin] = cycle_bounds($billingDay, $period);
+    $rango = date('d/m', strtotime($ini)) . ' – ' . date('d/m', strtotime($fin));
+    return $corto ? $rango . '/' . substr($period, 2, 2) : 'ciclo ' . mes_texto($period) . ' (' . $rango . ')';
+}
+
 /** @return list<array<string,mixed>> Contratos del suministro, del más viejo al más nuevo. */
 function supply_contracts(int $supplyId): array
 {
@@ -60,8 +125,7 @@ function kw_status(float $kw, array $contract): string
 function month_series(int $supplyId, string $period, ?array $contracts = null): array
 {
     $contracts ??= supply_contracts($supplyId);
-    $desde = $period . '-01 00:00:00';
-    $hasta = (new DateTimeImmutable($desde))->modify('+1 month')->format('Y-m-d H:i:s');
+    [$desde, $hasta] = cycle_range(supply_billing_day($supplyId), $period);
     $stmt = db()->prepare(
         'SELECT ts, raw_value, status FROM readings WHERE supply_id = ? AND ts >= ? AND ts < ? ORDER BY ts'
     );
@@ -129,7 +193,7 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
         }
     }
 
-    $fin = (new DateTimeImmutable($period . '-01'))->modify('last day of this month')->format('Y-m-d');
+    [$inicioCiclo, $fin] = cycle_bounds(supply_billing_day($supplyId), $period);
     $contratoFin = $contracts ? contract_for($contracts, $fin) : null;
     $estado = $max === null ? 'sin_datos'
         : ($excesos ? 'critico' : ($sobreContratada ? 'atencion' : 'normal'));
@@ -137,6 +201,8 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
     $resumen = [
         'supply_id' => $supplyId,
         'period' => $period,
+        'period_start' => $inicioCiclo,
+        'period_end' => $fin,
         'first_ts' => $serie[0]['ts'] ?? null,
         'last_ts' => $serie ? $serie[count($serie) - 1]['ts'] : null,
         'readings_count' => count($serie),
@@ -162,8 +228,7 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
 
     // Alertas: agregar las nuevas y quitar las que ya no corresponden
     // (por ejemplo, si se corrigió la potencia contratada).
-    $desde = $period . '-01 00:00:00';
-    $hasta = (new DateTimeImmutable($desde))->modify('+1 month')->format('Y-m-d H:i:s');
+    [$desde, $hasta] = cycle_range(supply_billing_day($supplyId), $period);
     $tsExcesos = array_map(static fn ($x) => $x[0], $excesos);
     $ins = db()->prepare(
         'INSERT INTO alerts (supply_id, ts, kw, contracted_kw, limit_kw, notified_at) VALUES (?, ?, ?, ?, ?, ?)
@@ -187,16 +252,20 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
 /** Recalcula todos los meses con lecturas de un suministro (tras cambiar un contrato). */
 function recompute_supply(int $supplyId): int
 {
-    $stmt = db()->prepare(
-        "SELECT DISTINCT DATE_FORMAT(ts, '%Y-%m') AS period FROM readings WHERE supply_id = ? ORDER BY period"
-    );
+    $billing = supply_billing_day($supplyId);
+    $stmt = db()->prepare('SELECT DISTINCT DATE(ts) FROM readings WHERE supply_id = ?');
     $stmt->execute([$supplyId]);
-    $n = 0;
-    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $period) {
-        recompute_month($supplyId, (string) $period, true);
-        $n++;
+    $periodos = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $dia) {
+        $periodos[period_of($billing, (string) $dia)] = true;
     }
-    return $n;
+    ksort($periodos);
+    // Si cambió el día de cierre, los resúmenes viejos ya no corresponden.
+    db()->prepare('DELETE FROM monthly_summaries WHERE supply_id = ?')->execute([$supplyId]);
+    foreach (array_keys($periodos) as $period) {
+        recompute_month($supplyId, (string) $period, true);
+    }
+    return count($periodos);
 }
 
 /**
@@ -243,7 +312,7 @@ function notify_pending_alerts(int $supplyId): int
         $base = rtrim((string) config('app.base_url', ''), '/');
         if ($base) {
             $lineas[] = '';
-            $lineas[] = "Ver detalle: {$base}/index.php?page=supply&id={$supplyId}&period=" . substr((string) $max['ts'], 0, 7);
+            $lineas[] = "Ver detalle: {$base}/index.php?page=supply&id={$supplyId}&period=" . period_of(supply_billing_day($supplyId), (string) $max['ts']);
         }
         $desde = (string) config('mail.from', '');
         $cabeceras = [

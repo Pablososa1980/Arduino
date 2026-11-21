@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-/* Excel con las lecturas de 15 minutos de un mes (requiere permiso de descarga). */
+/* Excel con las lecturas de 15 minutos de un ciclo (requiere permiso de descarga). */
 require_once __DIR__ . '/../app/xlsx_builder.php';
 
 $id = (int) ($_GET['id'] ?? 0);
@@ -19,10 +19,11 @@ if (!Auth::canSupply($id, true)) {
     forbidden();
 }
 
+$billing = $s['billing_day'] === null ? null : (int) $s['billing_day'];
 $contratos = supply_contracts($id);
 $serie = month_series($id, $period, $contratos);
 if (!$serie) {
-    not_found('No hay lecturas de ' . mes_texto($period) . '.');
+    not_found('No hay lecturas ' . period_phrase($billing, $period) . '.');
 }
 $q = db()->prepare('SELECT * FROM monthly_summaries WHERE supply_id = ? AND period = ?');
 $q->execute([$id, $period]);
@@ -56,10 +57,10 @@ $ruta = build_table_xlsx('Perfil ' . $period, [
     ['label' => 'Contratada (kW)', 'type' => 'number', 'width' => 15],
     ['label' => 'Límite (kW)', 'type' => 'number', 'width' => 13],
     ['label' => 'Estado', 'type' => 'text', 'width' => 22],
-    ['label' => 'Lectura Optimum', 'type' => 'text', 'width' => 16],
+    ['label' => 'Lectura MDC', 'type' => 'text', 'width' => 16],
 ], $filas, [
     "{$s['name']} · NIS {$s['nis']} · Medidor " . ($s['meter_serial'] ?: '—'),
-    'Período: ' . mes_texto($period) . ' · Máxima: ' . num($r['max_kw'] ?? null, 1) . ' kW (' . fecha_hora($r['max_ts'] ?? null) . ')'
+    'Período: ' . period_label($billing, $period) . ' · Máxima: ' . num($r['max_kw'] ?? null, 1) . ' kW (' . fecha_hora($r['max_ts'] ?? null) . ')'
         . ' · Límite: ' . num($r['limit_kw'] ?? null) . ' kW',
     'kW = valor del medidor (W) × factor ÷ 1000 · Generado por ' . ($usuario['username'] ?? '') . ' el ' . date('d/m/Y H:i'),
 ]);

@@ -269,7 +269,7 @@ def obtener_suministros():
 
 
 def armar_paquete(archivo_excel, nis, desde, hasta):
-    """Convierte el Excel de Optimum en el paquete optimum-readings-v1 que recibe el panel."""
+    """Convierte el Excel de Optimum en el paquete mdc-readings-v1 que recibe el panel."""
     registros, info = ap.leer_perfil(archivo_excel)
     if info["punto"] and str(info["punto"]).strip() != str(nis):
         raise RuntimeError(f"El Excel es del Punto de Medida {info['punto']}, no del {nis}: no se envía.")
@@ -280,7 +280,7 @@ def armar_paquete(archivo_excel, nis, desde, hasta):
         hueco = r["valor"] is None or r["estado"].lower() == "hueco"
         lecturas.append([r["inicio"].strftime("%Y-%m-%d %H:%M"), None if hueco else r["valor"], r["estado"]])
     return {
-        "format": "optimum-readings-v1",
+        "format": "mdc-readings-v1",
         "nis": str(nis),
         "period_start": desde or registros[0]["inicio"].strftime("%Y-%m-%d"),
         "period_end": hasta or registros[-1]["inicio"].strftime("%Y-%m-%d"),
@@ -369,6 +369,10 @@ def correr(descargar_datos=True, subir=True, mes=None, solo_nis=None):
             errores.append(f"{s['nis']}: {msg}")
             continue
         for desde, hasta, etiqueta in periodos:
+            # Ciclo en curso: si el ciclo de facturación empezó antes del 1° del mes
+            # (ej. cierre 15 → arranca el 16 del mes anterior), se baja desde ahí.
+            if etiqueta is None and not mes and s.get("cycle_start") and s["cycle_start"] < desde:
+                desde = s["cycle_start"]
             try:
                 if descargar_datos:
                     log(f"   Período {desde} a {hasta}")

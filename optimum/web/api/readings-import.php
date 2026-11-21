@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 /*
  * POST api/readings-import.php  (Authorization: Bearer <token>, cuerpo JSON)
- * Recibe las lecturas de 15 minutos de un suministro (formato optimum-readings-v1).
+ * Recibe las lecturas de 15 minutos de un suministro (formato mdc-readings-v1).
  */
 require __DIR__ . '/../app/api.php';
 require __DIR__ . '/../app/importer.php';

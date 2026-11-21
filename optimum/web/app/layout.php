@@ -36,7 +36,7 @@ function render_header(string $title, string $active = ''): void
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title><?= e($title) ?> · <?= e($appName) ?></title>
-<link rel="stylesheet" href="assets/app.css?v=1">
+<link rel="stylesheet" href="assets/app.css?v=2">
 </head>
 <body>
 <?php if ($user): ?>
@@ -128,7 +128,7 @@ function mini_barras(array $diario, ?float $limite, ?float $contratada, int $anc
     }
     $svg .= sprintf('<line x1="0" x2="%d" y1="%.1f" y2="%.1f" stroke="var(--critical)" stroke-width="1.2" stroke-dasharray="4 3"/>',
         $ancho, $y($limite), $y($limite));
-    return '<svg class="mini" viewBox="0 0 ' . $ancho . ' ' . $alto . '" preserveAspectRatio="none" role="img" aria-label="Máximos diarios del mes">' . $svg . '</svg>';
+    return '<svg class="mini" viewBox="0 0 ' . $ancho . ' ' . $alto . '" preserveAspectRatio="none" role="img" aria-label="Máximos diarios del ciclo">' . $svg . '</svg>';
 }
 
 /** Datos para los gráficos JS, embebidos de forma segura. */

@@ -12,7 +12,7 @@ $filtro = $id ? [$id] : $ids;
 $alertas = [];
 if ($filtro) {
     $alertas = db()->query(
-        'SELECT a.*, s.name, s.nis FROM alerts a JOIN supplies s ON s.id = a.supply_id
+        'SELECT a.*, s.name, s.nis, s.billing_day FROM alerts a JOIN supplies s ON s.id = a.supply_id
          WHERE a.supply_id IN (' . implode(',', $filtro) . ') ORDER BY a.ts DESC LIMIT 500'
     )->fetchAll();
 }
@@ -31,7 +31,7 @@ render_header('Alertas', 'alerts');
     <tbody>
     <?php foreach ($alertas as $a): ?>
       <tr>
-        <td><a href="<?= e(app_url('supply', ['id' => $a['supply_id'], 'period' => substr((string) $a['ts'], 0, 7)])) ?>"><?= e(fecha_hora($a['ts'])) ?></a></td>
+        <td><a href="<?= e(app_url('supply', ['id' => $a['supply_id'], 'period' => period_of($a['billing_day'] === null ? null : (int) $a['billing_day'], (string) $a['ts'])])) ?>"><?= e(fecha_hora($a['ts'])) ?></a></td>
         <td><?= e($a['name']) ?> <span class="muted small">NIS <?= e($a['nis']) ?></span></td>
         <td class="n"><?= num($a['kw'], 1) ?></td><td class="n"><?= num($a['contracted_kw']) ?></td><td class="n"><?= num($a['limit_kw']) ?></td>
         <td class="n"><b style="color:var(--critical-text)">+<?= num((float) $a['kw'] - (float) $a['limit_kw'], 1) ?> kW</b></td>
