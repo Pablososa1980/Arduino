@@ -41,6 +41,8 @@ $filas = (static function () use ($serie, $contratos, $estados) {
             $p['kw'] === null ? null : round($p['kw'] * INTERVAL_HOURS, 3),
             $c ? (float) $c['contracted_kw'] : null,
             $c ? round(contract_limit($c), 2) : null,
+            // Exceso de potencia: solo si superó el límite, y se cuenta desde la contratada.
+            ($c && $p['kw'] !== null && $p['kw'] > contract_limit($c)) ? round($p['kw'] - (float) $c['contracted_kw'], 3) : null,
             $p['kw'] === null ? 'Sin lectura' : ($estados[$p['estado']] ?? ''),
             $p['status'],
         ];
@@ -56,6 +58,7 @@ $ruta = build_table_xlsx('Perfil ' . $period, [
     ['label' => 'Energía (kWh)', 'type' => 'number', 'width' => 14],
     ['label' => 'Contratada (kW)', 'type' => 'number', 'width' => 15],
     ['label' => 'Límite (kW)', 'type' => 'number', 'width' => 13],
+    ['label' => 'Exceso de potencia (kW)', 'type' => 'number', 'width' => 20],
     ['label' => 'Estado', 'type' => 'text', 'width' => 22],
     ['label' => 'Lectura MDC', 'type' => 'text', 'width' => 16],
 ], $filas, [

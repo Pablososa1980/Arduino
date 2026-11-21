@@ -73,7 +73,7 @@ render_header('Inicio', 'dashboard');
         <div class="muted small">Máximos diarios del ciclo</div>
         <?= mini_barras($diario, $r['limit_kw'] !== null ? (float) $r['limit_kw'] : null, $r['contracted_kw'] !== null ? (float) $r['contracted_kw'] : null) ?>
         <div class="small"><?php if ($margen !== null && $margen >= 0): ?>Margen hasta el límite: <b><?= num($margen) ?> kW</b>
-          <?php elseif ($margen !== null): ?><b style="color:var(--critical-text)">Excede el límite en <?= num(-$margen) ?> kW</b><?php endif; ?>
+          <?php elseif ($margen !== null): ?><b style="color:var(--critical-text)">Exceso de potencia: <?= num((float) $r['max_kw'] - (float) $r['contracted_kw']) ?> kW</b><?php endif; ?>
           · Intervalos sobre el límite: <b><?= (int) $r['over_limit_count'] ?></b></div>
         <div class="muted small">Datos hasta <?= e(fecha_hora($r['last_ts'])) ?></div>
       <?php else: ?>

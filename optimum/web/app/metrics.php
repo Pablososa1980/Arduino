@@ -303,8 +303,9 @@ function notify_pending_alerts(int $supplyId): int
             'Intervalos nuevos sobre el límite: ' . count($pendientes),
         ];
         foreach (array_slice($pendientes, 0, 30) as $a) {
-            $lineas[] = sprintf('  %s   %s kW   (límite %s kW, contratada %s kW)',
-                fecha_hora($a['ts']), num($a['kw'], 1), num($a['limit_kw']), num($a['contracted_kw']));
+            $lineas[] = sprintf('  %s   %s kW   exceso %s kW sobre la contratada (%s kW; límite %s kW)',
+                fecha_hora($a['ts']), num($a['kw'], 1), num((float) $a['kw'] - (float) $a['contracted_kw'], 1),
+                num($a['contracted_kw']), num($a['limit_kw']));
         }
         if (count($pendientes) > 30) {
             $lineas[] = '  ... y ' . (count($pendientes) - 30) . ' más';

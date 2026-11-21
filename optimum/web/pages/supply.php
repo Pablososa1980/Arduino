@@ -83,7 +83,7 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
   $msg = [
       'normal' => 'La demanda máxima ' . period_phrase($billing, $period) . ' (' . num($r['max_kw']) . ' kW) está por debajo de la potencia contratada. Margen hasta el límite: ' . num($margen) . ' kW.',
       'atencion' => 'La demanda superó la contratada en ' . (int) $r['over_contract_count'] . ' intervalo(s), sin pasar el límite de tolerancia (' . num($r['limit_kw']) . ' kW).',
-      'critico' => 'Se superó el límite de tolerancia en ' . (int) $r['over_limit_count'] . ' intervalo(s). Máximo: ' . num($r['max_kw']) . ' kW (' . num((float) $r['max_kw'] / (float) $r['contracted_kw'] * 100, 1) . ' % de la contratada).',
+      'critico' => 'Se superó el límite de tolerancia (' . num($r['limit_kw']) . ' kW) en ' . (int) $r['over_limit_count'] . ' intervalo(s). Máximo: ' . num($r['max_kw']) . ' kW, exceso de potencia de ' . num((float) $r['max_kw'] - (float) $r['contracted_kw'], 1) . ' kW sobre la contratada (' . num($r['contracted_kw']) . ' kW).',
       'sin_datos' => 'Sin lecturas válidas en el período.',
   ][$estado]; ?>
   <div class="estado <?= $cls ?>"><div><strong><?= e(ESTADOS[$estado][0]) ?></strong><span><?= e($msg) ?></span></div></div>
@@ -91,8 +91,14 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
   <div class="kpis">
     <div class="kpi"><div class="l">Demanda máxima</div><div class="v"><?= num($r['max_kw']) ?><small>kW</small></div>
       <div class="d"><?= num((float) $r['max_kw'] / (float) $r['contracted_kw'] * 100, 1) ?> % · <?= e(fecha_hora($r['max_ts'])) ?></div></div>
-    <div class="kpi"><div class="l"><?= $margen >= 0 ? 'Margen hasta el límite' : 'Exceso sobre el límite' ?></div>
-      <div class="v"><?= num(abs($margen)) ?><small>kW</small></div><div class="d">Límite <?= num($r['limit_kw']) ?> kW</div></div>
+    <?php if ($margen >= 0): ?>
+    <div class="kpi"><div class="l">Margen hasta el límite</div>
+      <div class="v"><?= num($margen) ?><small>kW</small></div><div class="d">Límite <?= num($r['limit_kw']) ?> kW</div></div>
+    <?php else: ?>
+    <div class="kpi"><div class="l">Exceso de potencia</div>
+      <div class="v" style="color:var(--critical-text)"><?= num((float) $r['max_kw'] - (float) $r['contracted_kw'], 1) ?><small>kW</small></div>
+      <div class="d">Máxima − contratada (<?= num($r['contracted_kw']) ?> kW). Superó el límite de <?= num($r['limit_kw']) ?> kW</div></div>
+    <?php endif; ?>
     <div class="kpi"><div class="l">Energía del período</div><div class="v"><?= num((float) $r['energy_kwh'] / 1000, 1) ?><small>MWh</small></div>
       <div class="d">Promedio <?= num($r['avg_kw']) ?> kW</div></div>
     <div class="kpi"><div class="l">Factor de carga</div><div class="v"><?= $r['max_kw'] > 0 ? num((float) $r['avg_kw'] / (float) $r['max_kw'] * 100, 1) : '—' ?><small>%</small></div>
@@ -135,9 +141,11 @@ $margen = $r && $r['max_kw'] !== null ? (float) $r['limit_kw'] - (float) $r['max
 
   <details<?= $excesos ? ' open' : '' ?>><summary>Intervalos que superaron el límite (<?= count($excesos) ?: 'ninguno' ?>)</summary>
     <?php if ($excesos): ?><div class="tabla-scroll"><table>
-      <thead><tr><th>Fecha y hora</th><th class="n">kW</th><th class="n">Límite kW</th><th class="n">% contratada</th></tr></thead><tbody>
+      <thead><tr><th>Fecha y hora</th><th class="n">kW</th><th class="n">Contratada kW</th><th class="n">Límite kW</th><th class="n">Exceso de potencia</th><th class="n">% contratada</th></tr></thead><tbody>
       <?php foreach ($excesos as $a): ?><tr><td><?= e(fecha_hora($a['ts'])) ?></td><td class="n"><?= num($a['kw'], 1) ?></td>
-        <td class="n"><?= num($a['limit_kw']) ?></td><td class="n"><?= num((float) $a['kw'] / (float) $a['contracted_kw'] * 100, 1) ?></td></tr><?php endforeach; ?>
+        <td class="n"><?= num($a['contracted_kw']) ?></td><td class="n"><?= num($a['limit_kw']) ?></td>
+        <td class="n"><b style="color:var(--critical-text)">+<?= num((float) $a['kw'] - (float) $a['contracted_kw'], 1) ?> kW</b></td>
+        <td class="n"><?= num((float) $a['kw'] / (float) $a['contracted_kw'] * 100, 1) ?></td></tr><?php endforeach; ?>
     </tbody></table></div>
     <?php else: ?><p class="muted">No hubo intervalos por encima del límite en el período.</p><?php endif; ?>
   </details>
