@@ -12,6 +12,8 @@ Flujo que replica:
   8. Medidor: el que empieza con "EGM"
   9. Log: "Todos"
  10. Canal: "Sum Li Active Power + (QI+QIV) (last average 1)- 0 x"
+     (Actaris ACE6000: "... (time integral 5) - 0", medidor por su número de
+     serie o "Todos"; el orquestador toma prefijo y canal de cada suministro)
  11. Aplicar -> ícono de Excel -> descarga
 
 Requisitos (una sola vez):

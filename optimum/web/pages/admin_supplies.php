@@ -183,12 +183,17 @@ if ($action === 'new' || ($action === 'edit' && $id)) {
         <label>Cliente (opcional) <input name="client" value="<?= e($v('client')) ?>"></label>
         <label>Prefijo del medidor
           <input name="meter_prefix" value="<?= e($v('meter_prefix', 'EGM')) ?>">
-          <span class="help">En el MDC se elige el medidor que empieza con esto.</span></label>
+          <span class="help">En el MDC se elige el medidor que empieza con esto (EGM…, o el número de serie de un ACE6000, p. ej. 0175). Con «Todos» se toman todos los medidores del punto.</span></label>
         <label>Día de cierre de facturación
           <input type="number" name="billing_day" min="1" max="31" value="<?= e($v('billing_day')) ?>" placeholder="Vacío = mes calendario">
           <span class="help">Ej.: con cierre 15, el ciclo de noviembre va del 16/10 al 15/11 (incluye el día 15).
             Vacío: del 1 al último día del mes. Si el mes no tiene ese día, cierra el último día.</span></label>
-        <label class="full">Canal del MDC <input name="channel" value="<?= e($v('channel', 'Sum Li Active Power + (QI+QIV) (last average 1)- 0 x')) ?>" required></label>
+        <label class="full">Canal del MDC <input name="channel" list="canales-mdc" value="<?= e($v('channel', 'Sum Li Active Power + (QI+QIV) (last average 1)- 0 x')) ?>" required>
+          <datalist id="canales-mdc">
+            <option value="Sum Li Active Power + (QI+QIV) (last average 1)- 0 x">Medidores EGM: potencia (W)</option>
+            <option value="Sum Li Active Power + (QI+QIV) (time integral 5) - 0">Actaris ACE6000: energía por intervalo (Wh)</option>
+          </datalist>
+          <span class="help">EGM: «(last average 1)», viene en W. Actaris ACE6000: «(time integral 5)», viene en Wh por intervalo y se convierte sola a potencia media (Wh × 4 en 15 min).</span></label>
         <?php if (!$s): ?>
           <fieldset class="full"><legend>Condición contractual inicial</legend>
             <div class="form-grid" style="margin-top:0">

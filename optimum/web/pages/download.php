@@ -52,7 +52,7 @@ $filas = (static function () use ($serie, $contratos, $estados) {
 $usuario = Auth::user();
 $ruta = build_table_xlsx('Perfil ' . $period, [
     ['label' => 'Fecha y hora', 'type' => 'datetime', 'width' => 18],
-    ['label' => 'Valor medidor (W)', 'type' => 'number', 'width' => 16],
+    ['label' => 'Potencia medidor (W)', 'type' => 'number', 'width' => 18],
     ['label' => 'Factor', 'type' => 'number', 'width' => 11],
     ['label' => 'Demanda (kW)', 'type' => 'number', 'width' => 14],
     ['label' => 'Energía (kWh)', 'type' => 'number', 'width' => 14],
@@ -65,7 +65,7 @@ $ruta = build_table_xlsx('Perfil ' . $period, [
     "{$s['name']} · NIS {$s['nis']} · Medidor " . ($s['meter_serial'] ?: '—'),
     'Período: ' . period_label($billing, $period) . ' · Máxima: ' . num($r['max_kw'] ?? null, 1) . ' kW (' . fecha_hora($r['max_ts'] ?? null) . ')'
         . ' · Límite: ' . num($r['limit_kw'] ?? null) . ' kW',
-    'kW = valor del medidor (W) × factor ÷ 1000 · Generado por ' . ($usuario['username'] ?? '') . ' el ' . date('d/m/Y H:i'),
+    'kW = potencia del medidor (W) × factor ÷ 1000 (medidores que registran Wh por intervalo: W = Wh × 4) · Generado por ' . ($usuario['username'] ?? '') . ' el ' . date('d/m/Y H:i'),
 ]);
 audit('download.readings', 'supply', (string) $id, ['period' => $period]);
 stream_xlsx_download($ruta, "perfil_{$s['nis']}_{$period}.xlsx");

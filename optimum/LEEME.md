@@ -63,6 +63,17 @@ Para llenar el panel con meses anteriores, una sola vez:
 
 En el panel: *Suministros → Agregar suministro*. Cargás el NIS, el factor, la potencia contratada y la tolerancia. Desde la corrida siguiente, el script lo descarga solo; no hace falta tocar ningún archivo.
 
+### Modelos de medidor
+
+| Medidor | Prefijo del medidor | Canal del MDC | Unidad del Excel |
+|---|---|---|---|
+| EGM (por defecto) | `EGM` | `Sum Li Active Power + (QI+QIV) (last average 1)- 0 x` | W (potencia) |
+| Actaris ACE6000 | inicio del número de serie (p. ej. `0175`) o `Todos` | `Sum Li Active Power + (QI+QIV) (time integral 5) - 0` | Wh por intervalo (energía) |
+
+El ACE6000 no guarda potencia sino la energía de cada intervalo de 15 minutos. El script la convierte a potencia media del intervalo antes de enviarla: W = Wh ÷ 0,25 h = Wh × 4 (2,9 Wh → 11,6 W). Después se aplica el factor como siempre: kW = W × factor ÷ 1000. La conversión es automática, según la columna *Unidad* del Excel. Los dos canales aparecen como sugerencia en el formulario del suministro.
+
+La primera vez, probalo solo con ese suministro: `python orquestador_diario.py --nis NIS_NUEVO`.
+
 ## Cosas a saber
 
 - **La PC tiene que estar encendida y con sesión iniciada** a la hora de la tarea. La contraseña y el token guardados pertenecen a tu usuario de Windows, y Optimum solo se alcanza desde la red de ANDE.

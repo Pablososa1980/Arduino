@@ -275,6 +275,9 @@ def armar_paquete(archivo_excel, nis, desde, hasta):
         raise RuntimeError(f"El Excel es del Punto de Medida {info['punto']}, no del {nis}: no se envía.")
     if not registros:
         raise RuntimeError("El Excel no tiene lecturas.")
+    if info.get("unidad_original", info["unidad"]) != info["unidad"]:
+        log(f"   El medidor registra energía ({info['unidad_original']} por intervalo): "
+            f"se convierte a potencia media ({info['unidad']}).")
     lecturas = []
     for r in registros:
         hueco = r["valor"] is None or r["estado"].lower() == "hueco"
@@ -285,6 +288,7 @@ def armar_paquete(archivo_excel, nis, desde, hasta):
         "period_start": desde or registros[0]["inicio"].strftime("%Y-%m-%d"),
         "period_end": hasta or registros[-1]["inicio"].strftime("%Y-%m-%d"),
         "unit": info["unidad"] or "W",
+        "source_unit": info.get("unidad_original") or info["unidad"] or "W",
         "meter": info["medidor"],
         "channel": info["canal"],
         "source_file": Path(archivo_excel).name,

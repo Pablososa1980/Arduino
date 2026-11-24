@@ -2,7 +2,9 @@
 Análisis del Perfil de Carga descargado de Optimum.SM.
 
 - Lee el Excel que baja descargar_perfil_carga.py (columna "Valor" en W,
-  valores secundarios del medidor, intervalos de 15 min).
+  valores secundarios del medidor, intervalos de 15 min). Si el medidor
+  registra energía por intervalo (Wh, p. ej. Actaris ACE6000), la pasa a
+  potencia media del intervalo (W = Wh ÷ horas del intervalo = Wh × 4).
 - Multiplica por el factor del suministro y pasa a kW.
 - Compara contra la potencia contratada y su tolerancia.
 - Genera una página web (HTML autocontenido, no necesita internet ni servidor).
@@ -166,7 +168,35 @@ def leer_perfil(ruta):
         "canal": next((r["canal"] for r in registros if r["canal"]), ""),
         "unidad": next((r["unidad"] for r in registros if r["unidad"]), "W"),
     }
+    info["unidad_original"] = info["unidad"]
+    if _ENERGIA_A_POTENCIA.get(info["unidad"].lower()):
+        _energia_a_potencia(registros, info)
     return registros, info
+
+
+# Algunos medidores (p. ej. Actaris ACE6000, canal "... (time integral 5)") no
+# registran potencia sino la ENERGÍA de cada intervalo (Wh por 15 min). La
+# potencia media del intervalo, que es la demanda que se factura, es
+# energía ÷ duración: 2,9 Wh en 15 min = 2,9 × 4 = 11,6 W.
+_ENERGIA_A_POTENCIA = {"wh": "W", "kwh": "kW", "mwh": "MW"}
+
+
+def _energia_a_potencia(registros, info):
+    """Convierte en el lugar los valores de energía por intervalo en potencia media."""
+    for r in registros:
+        r["valor_original"] = r["valor"]
+        destino = _ENERGIA_A_POTENCIA.get(r["unidad"].lower())
+        if destino is None:
+            if r["unidad"]:
+                raise ValueError(f"El Excel mezcla unidades ({info['unidad']} y {r['unidad']}).")
+            destino = _ENERGIA_A_POTENCIA[info["unidad"].lower()]
+        horas = (r["fin"] - r["inicio"]).total_seconds() / 3600 if r["fin"] else 0.25
+        if horas <= 0:
+            raise ValueError(f"Intervalo inválido en {r['inicio']} (fin {r['fin']}).")
+        if r["valor"] is not None:
+            r["valor"] = round(r["valor"] / horas, 6)
+        r["unidad"] = destino
+    info["unidad"] = _ENERGIA_A_POTENCIA[info["unidad"].lower()]
 
 
 # -----------------------------------------------------------------------------
