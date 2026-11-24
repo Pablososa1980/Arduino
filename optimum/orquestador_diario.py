@@ -268,6 +268,13 @@ def obtener_suministros():
     return llamar_api("GET", "api/supplies.php")["supplies"]
 
 
+def canal_aceptado(canal_excel):
+    """El canal del Excel tiene que ser el configurado o uno de los canales conocidos."""
+    def clave(c):  # hasta el último paréntesis: "... (time integral 5)" sin el "- 0"
+        return dp.compacto(c[: c.rfind(")") + 1] if ")" in c else c)
+    return any(clave(c) and dp.compacto(canal_excel).startswith(clave(c)) for c in [dp.CANAL, *dp.CANALES_CONOCIDOS])
+
+
 def armar_paquete(archivo_excel, nis, desde, hasta):
     """Convierte el Excel de Optimum en el paquete mdc-readings-v1 que recibe el panel."""
     registros, info = ap.leer_perfil(archivo_excel)
@@ -275,6 +282,9 @@ def armar_paquete(archivo_excel, nis, desde, hasta):
         raise RuntimeError(f"El Excel es del Punto de Medida {info['punto']}, no del {nis}: no se envía.")
     if not registros:
         raise RuntimeError("El Excel no tiene lecturas.")
+    if info["canal"] and not canal_aceptado(info["canal"]):
+        raise RuntimeError(f"El Excel trae el canal '{info['canal']}', que no es un canal de potencia activa "
+                           f"conocido ni el configurado ('{dp.CANAL}'): no se envía.")
     if info.get("unidad_original", info["unidad"]) != info["unidad"]:
         log(f"   El medidor registra energía ({info['unidad_original']} por intervalo): "
             f"se convierte a potencia media ({info['unidad']}).")

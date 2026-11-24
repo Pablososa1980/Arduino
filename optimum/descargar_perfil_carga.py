@@ -75,6 +75,12 @@ TIPO = "Tabla"
 MEDIDOR_PREFIJO = "EGM"
 LOG = "Todos"
 CANAL = "Sum Li Active Power + (QI+QIV) (last average 1)- 0 x"
+# Canales de potencia activa importada conocidos, por modelo de medidor. Si el
+# canal configurado no existe para el medidor del punto, se prueban estos.
+CANALES_CONOCIDOS = [
+    "Sum Li Active Power + (QI+QIV) (last average 1)- 0 x",   # EGM: potencia (W)
+    "Sum Li Active Power + (QI+QIV) (time integral 5) - 0",   # Actaris ACE6000: energía (Wh)
+]
 
 CARPETA_DESCARGAS = Path(__file__).resolve().parent / "descargas"
 CARPETA_DEBUG = Path(__file__).resolve().parent / "debug"
@@ -192,7 +198,7 @@ def control_despues_de(page, etiqueta, tag="select"):
     return elegida.locator(f"xpath=following::{tag}[1]")
 
 
-def seleccionar(page, etiqueta, texto, modo="exacto"):
+def seleccionar(page, etiqueta, texto, modo="exacto", teclado=True, espera_ms=None):
     """
     Selecciona una opción de un <select> ubicado tras `etiqueta`.
     modo: "exacto" | "empieza" | "contiene"
@@ -221,17 +227,17 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
     # combo carga sus opciones recién al abrirlo (select2 con AJAX, como Canal):
     # en ese caso lo abrimos y elegimos con clics, como lo haría una persona.
     inicio = time.time()
-    limite = inicio + TIMEOUT_MS / 1000
+    limite = inicio + (espera_ms or TIMEOUT_MS) / 1000
     probado_ui = False
     valor, visible = buscar()
     while valor is None and time.time() < limite:
         if not probado_ui and time.time() - inicio > ESPERA_ANTES_DE_ABRIR_COMBO_S:
             probado_ui = True
-            if seleccionar_con_clics(page, etiqueta, texto):
+            if seleccionar_con_clics(page, etiqueta, texto, teclado):
                 return
         time.sleep(0.5)
         valor, visible = buscar()
-    if valor is None and not probado_ui and seleccionar_con_clics(page, etiqueta, texto):
+    if valor is None and not probado_ui and seleccionar_con_clics(page, etiqueta, texto, teclado):
         return
     if valor is None:
         lista = [t for _, t in opciones()]
@@ -245,7 +251,7 @@ def seleccionar(page, etiqueta, texto, modo="exacto"):
                 el.value = v;
                 el.dispatchEvent(new Event('input', {bubbles: true}));
                 el.dispatchEvent(new Event('change', {bubbles: true}));
-                if (window.jQuery) { window.jQuery(el).val(v).trigger('change'); }
+                if (window.jQuery) { window.jQuery(el).val(v).trigger('change').trigger('chosen:updated'); }
             }""",
             valor,
         )
@@ -261,7 +267,13 @@ def etiqueta_visible(page, etiqueta):
     return etiquetas.first
 
 
-def seleccionar_con_clics(page, etiqueta, texto):
+# Textos que muestran los combos cuando no hay coincidencias o están cargando:
+# no son opciones y nunca hay que hacerles clic.
+_NO_ES_OPCION = re.compile(r"ning[uú]n resultado|no hay resultado|no results|no matches|sin resultados|"
+                           r"no se encontr|buscando|searching|cargando|loading", re.I)
+
+
+def seleccionar_con_clics(page, etiqueta, texto, teclado=True):
     """Abre el combo visible que está tras la etiqueta, busca el texto y hace clic en el resultado."""
     log(f"   {etiqueta}: el combo no trae la opción cargada; lo abro y la busco con clics...")
     try:
@@ -310,6 +322,9 @@ def seleccionar_con_clics(page, etiqueta, texto):
                     if not item.is_visible():
                         continue
                     elegido = item.inner_text().strip()
+                    clase = item.get_attribute("class") or ""
+                    if _NO_ES_OPCION.search(elegido) or re.search(r"no-results|results__message|loading", clase):
+                        continue
                     # Muchos combos escuchan el clic en el <a> de adentro, no en el <li>.
                     interno = item.locator("a:visible")
                     (interno.first if interno.count() else item).click()
@@ -318,6 +333,10 @@ def seleccionar_con_clics(page, etiqueta, texto):
                     return True
             page.wait_for_timeout(500)
 
+        if not teclado:
+            log(f"   {etiqueta}: '{texto}' no está en la lista")
+            page.keyboard.press("Escape")
+            return False
         # Último recurso: elegir la primera sugerencia con el teclado.
         log(f"   {etiqueta}: no reconocí la opción en la lista; pruebo con flecha abajo + Enter")
         guardar_debug(page, f"{etiqueta}_lista")
@@ -329,6 +348,60 @@ def seleccionar_con_clics(page, etiqueta, texto):
         log(f"   No pude elegirlo con clics: {str(e).splitlines()[0]}")
         page.keyboard.press("Escape")
         return False
+
+
+def opciones_de(page, etiqueta):
+    """Textos de las opciones del <select> que está tras la etiqueta ([] si todavía no existe)."""
+    try:
+        sel = control_despues_de(page, etiqueta, "select")
+        return sel.evaluate("el => [...el.options].map(o => o.textContent.trim())")
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def elegir_medidor(page, prefijo):
+    """
+    Elige el medidor que empieza con `prefijo`. Si el punto no tiene ninguno así
+    (p. ej. quedó "EGM" y el medidor es un Actaris ACE6000 "01752977"), toma el
+    único medidor del punto o "Todos": la lista solo trae medidores de ese NIS.
+    """
+    objetivo = compacto(prefijo)
+    inicio = time.time()
+    reales = []
+    while time.time() < inicio + TIMEOUT_MS / 1000:
+        opciones = opciones_de(page, "Medidor")
+        if any(compacto(t).startswith(objetivo) for t in opciones):
+            seleccionar(page, "Medidor", prefijo, modo="empieza")
+            return
+        reales = [t for t in opciones if compacto(t) not in ("", "todos", "medidor", "puntodemedida", "-")]
+        # Damos unos segundos por si las opciones llegan por AJAX antes de decidir.
+        if reales and time.time() > inicio + ESPERA_ANTES_DE_ABRIR_COMBO_S:
+            break
+        time.sleep(0.5)
+    if not reales:
+        raise RuntimeError(f"El combo Medidor no trae medidores para este punto (prefijo '{prefijo}').")
+    eleccion = reales[0] if len(reales) == 1 else "Todos"
+    log(f"   ⚠ Ningún medidor empieza con '{prefijo}' (hay: {', '.join(reales)}). Elijo '{eleccion}'."
+        f" Corregí el prefijo del suministro en el panel.")
+    seleccionar(page, "Medidor", eleccion, modo="exacto")
+
+
+def elegir_canal(page, canal):
+    """Elige el canal configurado; si el medidor no lo tiene, prueba los otros canales conocidos."""
+    candidatos = [canal] + [c for c in CANALES_CONOCIDOS if compacto(c) != compacto(canal)]
+    for i, c in enumerate(candidatos):
+        ultimo = i == len(candidatos) - 1
+        try:
+            if i:
+                log(f"   Pruebo con otro canal conocido: {c}")
+            seleccionar(page, "Canal", c, modo="contiene", teclado=ultimo,
+                        espera_ms=None if ultimo else (ESPERA_ANTES_DE_ABRIR_COMBO_S + 4) * 1000)
+            if i:
+                log("   ⚠ El canal configurado no existe para este medidor. Corregí el canal del suministro en el panel.")
+            return
+        except RuntimeError:
+            if ultimo:
+                raise
 
 
 def poner_fecha(page, etiqueta, valor_iso):
@@ -636,11 +709,11 @@ def descargar_perfil(nis, usuario, clave, desde=None, hasta=None, etiqueta=None)
             log("6) Tipo");            seleccionar(page, "Tipo", TIPO)
             paso = "nis";              ingresar_nis(page, nis)
             paso = "medidor"
-            log("8) Medidor");         seleccionar(page, "Medidor", MEDIDOR_PREFIJO, modo="empieza")
+            log("8) Medidor");         elegir_medidor(page, MEDIDOR_PREFIJO)
             paso = "log"
             log("9) Log");             seleccionar(page, "Log", LOG)
             paso = "canal"
-            log("10) Canal");          seleccionar(page, "Canal", CANAL, modo="contiene")
+            log("10) Canal");          elegir_canal(page, CANAL)
             paso = "aplicar";          aplicar(page)
             paso = "excel";            archivo = descargar_excel(page, nis, etiqueta)
             return archivo
