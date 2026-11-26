@@ -141,6 +141,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect(app_url('supplies', ['action' => 'edit', 'id' => $id]));
     }
 
+    if ($op === 'recompute' && $id) {
+        $n = recompute_supply($id);
+        audit('supply.recomputed', 'supply', (string) $id, ['ciclos' => $n]);
+        flash('success', "Se recalcularon {$n} ciclo(s) del histórico.");
+        redirect(app_url('supplies', ['action' => 'edit', 'id' => $id]));
+    }
+
     if ($op === 'delete_contract' && $id) {
         $cid = (int) ($_POST['contract_id'] ?? 0);
         $cuantos = db()->prepare('SELECT COUNT(*) FROM supply_contracts WHERE supply_id = ?');
@@ -213,8 +220,10 @@ if ($action === 'new' || ($action === 'edit' && $id)) {
     <?php if ($s): ?>
     <section class="card">
       <h2>Condiciones contractuales</h2>
-      <div class="nota">Si cambia la potencia contratada, el factor o la tolerancia, agregá una condición nueva con su fecha de vigencia:
-        las lecturas anteriores se siguen evaluando con la condición de su momento. Al guardar se recalcula todo el histórico.</div>
+      <div class="nota">Si cambia la potencia contratada, el factor o la tolerancia, agregá una condición nueva con su fecha de vigencia.
+        Cada ciclo se evalúa con la potencia contratada y la tolerancia vigentes el día de su cierre (una condición vigente desde un día
+        dentro del ciclo ya vale para ese ciclo completo; para que empiece en el siguiente, usá el día posterior al cierre).
+        El factor se aplica según la fecha de cada lectura. Al guardar se recalcula todo el histórico.</div>
       <div class="tabla-scroll"><table>
         <thead><tr><th>Vigente desde</th><th class="n">Factor</th><th class="n">Contratada kW</th><th class="n">Tolerancia</th><th class="n">Límite kW</th><th>Nota</th><th></th></tr></thead>
         <tbody>
@@ -237,6 +246,11 @@ if ($action === 'new' || ($action === 'edit' && $id)) {
         <label>Tolerancia (%) <input name="tolerance_pct" inputmode="decimal" value="<?= e(rtrim(rtrim((string) (end($contratos)['tolerance_pct'] ?? '10'), '0'), '.')) ?>" required></label>
         <label class="full">Nota <span class="help">(ej.: "Ampliación de potencia, resolución N°...")</span><input name="notes"></label>
         <div class="full"><button class="button" type="submit">Agregar condición</button></div>
+      </form>
+      <form method="post" class="inline-form" style="margin-top:12px" onsubmit="return confirm('¿Recalcular todos los ciclos de este suministro? Las alertas nuevas que aparezcan quedan como ya avisadas.')">
+        <?= csrf_field() ?><input type="hidden" name="op" value="recompute">
+        <button class="button ghost small" type="submit">Recalcular histórico</button>
+        <span class="help">Vuelve a calcular resúmenes y alertas de todos los ciclos con las reglas y condiciones actuales.</span>
       </form>
     </section>
     <?php endif;

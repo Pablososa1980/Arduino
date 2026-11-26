@@ -77,7 +77,7 @@ render_header('Histórico ' . $s['name'], 'history');
 
 <section class="card">
   <h2>Condiciones contractuales</h2>
-  <div class="nota">Cada lectura se evalúa con la condición vigente en su fecha.</div>
+  <div class="nota">Cada ciclo se evalúa con la potencia contratada y la tolerancia vigentes el día de su cierre. El factor es el vigente en la fecha de cada lectura.</div>
   <div class="tabla-scroll"><table>
     <thead><tr><th>Vigente desde</th><th class="n">Factor</th><th class="n">Contratada kW</th><th class="n">Tolerancia</th><th class="n">Límite kW</th><th>Nota</th></tr></thead>
     <tbody>

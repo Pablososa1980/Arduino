@@ -30,13 +30,15 @@ $q->execute([$id, $period]);
 $r = $q->fetch();
 
 $estados = ['normal' => 'Normal', 'atencion' => 'Sobre la contratada', 'critico' => 'Supera la tolerancia'];
-$filas = (static function () use ($serie, $contratos, $estados) {
+// Factor: el de la fecha de cada lectura. Contratada y límite: los del ciclo (vigentes en su cierre).
+$c = cycle_contract($contratos, $billing, $period);
+$filas = (static function () use ($serie, $contratos, $estados, $c) {
     foreach ($serie as $p) {
-        $c = contract_for($contratos, substr($p['ts'], 0, 10));
+        $f = contract_for($contratos, substr($p['ts'], 0, 10));
         yield [
             $p['ts'],
             $p['raw'],
-            $c ? (float) $c['factor'] : null,
+            $f ? (float) $f['factor'] : null,
             $p['kw'] === null ? null : round($p['kw'], 3),
             $p['kw'] === null ? null : round($p['kw'] * INTERVAL_HOURS, 3),
             $c ? (float) $c['contracted_kw'] : null,

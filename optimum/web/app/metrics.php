@@ -8,6 +8,11 @@ declare(strict_types=1);
  *
  *   kW = valor del medidor (W, secundario) × factor ÷ 1000
  *   límite = potencia contratada × (1 + tolerancia)
+ *
+ * Condiciones con vigencia: el FACTOR es el de la fecha de cada lectura (es
+ * físico: cambia si se cambian los transformadores). La POTENCIA CONTRATADA y
+ * la TOLERANCIA son las de la condición vigente el día de CIERRE del ciclo, y
+ * valen para todo el ciclo: un ciclo nunca mezcla dos potencias contratadas.
  */
 
 const INTERVAL_HOURS = 0.25;   // lecturas de 15 minutos
@@ -109,6 +114,12 @@ function contract_limit(array $contract): float
     return (float) $contract['contracted_kw'] * (1 + (float) $contract['tolerance_pct'] / 100);
 }
 
+/** Condición que fija la potencia contratada y la tolerancia de todo un ciclo: la vigente en su cierre. */
+function cycle_contract(array $contracts, ?int $billingDay, string $period): ?array
+{
+    return $contracts ? contract_for($contracts, cycle_bounds($billingDay, $period)[1]) : null;
+}
+
 function kw_status(float $kw, array $contract): string
 {
     if ($kw > contract_limit($contract)) {
@@ -118,14 +129,17 @@ function kw_status(float $kw, array $contract): string
 }
 
 /**
- * Serie de un mes: cada lectura con su kW ya calculado con el contrato vigente.
+ * Serie de un ciclo: cada lectura con su kW (factor de su fecha) y su estado
+ * (frente a la contratada y tolerancia del ciclo).
  *
  * @return list<array{ts:string,kw:?float,status:string,raw:?float,estado:?string}>
  */
 function month_series(int $supplyId, string $period, ?array $contracts = null): array
 {
     $contracts ??= supply_contracts($supplyId);
-    [$desde, $hasta] = cycle_range(supply_billing_day($supplyId), $period);
+    $billing = supply_billing_day($supplyId);
+    [$desde, $hasta] = cycle_range($billing, $period);
+    $delCiclo = cycle_contract($contracts, $billing, $period);
     $stmt = db()->prepare(
         'SELECT ts, raw_value, status FROM readings WHERE supply_id = ? AND ts >= ? AND ts < ? ORDER BY ts'
     );
@@ -143,7 +157,7 @@ function month_series(int $supplyId, string $period, ?array $contracts = null): 
             'kw' => $kw,
             'raw' => $r['raw_value'] === null ? null : (float) $r['raw_value'],
             'status' => (string) $r['status'],
-            'estado' => ($kw === null || !$contrato) ? null : kw_status($kw, $contrato),
+            'estado' => ($kw === null || !$delCiclo) ? null : kw_status($kw, $delCiclo),
         ];
     }
     return $serie;
@@ -160,6 +174,8 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
 {
     $contracts = supply_contracts($supplyId);
     $serie = month_series($supplyId, $period, $contracts);
+    $billing = supply_billing_day($supplyId);
+    $contratoFin = cycle_contract($contracts, $billing, $period);
 
     $max = null;
     $energia = 0.0;
@@ -175,7 +191,7 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
             continue;
         }
         $kw = $p['kw'];
-        $contrato = contract_for($contracts, substr($p['ts'], 0, 10));
+        $contrato = $contratoFin;
         $energia += $kw * INTERVAL_HOURS;
         $horas += INTERVAL_HOURS;
         if ($max === null || $kw > $max['kw']) {
@@ -193,8 +209,7 @@ function recompute_month(int $supplyId, string $period, bool $silencioso = false
         }
     }
 
-    [$inicioCiclo, $fin] = cycle_bounds(supply_billing_day($supplyId), $period);
-    $contratoFin = $contracts ? contract_for($contracts, $fin) : null;
+    [$inicioCiclo, $fin] = cycle_bounds($billing, $period);
     $estado = $max === null ? 'sin_datos'
         : ($excesos ? 'critico' : ($sobreContratada ? 'atencion' : 'normal'));
 

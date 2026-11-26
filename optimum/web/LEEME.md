@@ -9,7 +9,7 @@ un plan compartido de Hostinger.
   - **Administrador:** ve todo y administra usuarios, suministros y tokens.
   - **Consulta:** solo ve los suministros que se le asignan y, si se le habilita, descarga el Excel.
 - **Suministros:** se agregan desde el panel, con su NIS, nombre, prefijo del medidor, canal del MDC y **día de cierre de facturación**. El script diario los toma solo.
-- **Condiciones contractuales con vigencia:** factor, potencia contratada y tolerancia, con fecha "vigente desde". Si cambian, se agrega una condición nueva: los meses anteriores se siguen evaluando con la de su momento, y todo el histórico se recalcula solo.
+- **Condiciones contractuales con vigencia:** factor, potencia contratada y tolerancia, con fecha "vigente desde". Si cambian, se agrega una condición nueva: los ciclos anteriores se siguen evaluando con la de su momento (la vigente en su cierre), y todo el histórico se recalcula solo.
 - **Histórico:** se guardan las lecturas de 15 minutos en crudo (W). Con eso hay resumen mensual, detalle de cualquier mes, máximos diarios y excesos.
 - **Alertas:** cada intervalo por encima de contratada × (1 + tolerancia) queda registrado y se avisa por correo una sola vez a los usuarios marcados con "Recibir alertas" que pueden ver ese suministro.
 - **Auditoría:** ingresos, cambios, descargas y envíos del script.
@@ -26,7 +26,7 @@ Cada suministro puede tener un **día de cierre** (1 a 31). El panel agrupa todo
 - **Sin día de cierre**, el ciclo es el mes calendario: del 1 al último día.
 - **Meses cortos:** si el mes no tiene el día de cierre (por ejemplo, 31 en noviembre), cierra el último día de ese mes.
 - **Cambiar el día de cierre** recalcula todo el histórico; no hace falta volver a descargar nada.
-- **Cambios de condición contractual:** conviene que la fecha "vigente desde" sea el día siguiente a un cierre. Así un mismo ciclo no mezcla dos potencias contratadas. Cada lectura igual se evalúa con la condición de su fecha.
+- **Cambios de condición contractual:** todo el ciclo se evalúa con la potencia contratada y la tolerancia vigentes el día de su **cierre**. Con cierre el día 7, una condición "vigente desde" el 1/9 ya vale para el ciclo 8/8 – 7/9 completo; si querés que empiece en el ciclo siguiente, poné el día siguiente al cierre (8/9). El factor sí se toma según la fecha de cada lectura, porque cambia si se cambian los transformadores.
 
 **Actualización de un panel ya instalado:** antes de subir los archivos nuevos, ejecutá una vez `sql/migracion_ciclo_facturacion.sql` en phpMyAdmin, en la pestaña SQL. Solo agrega columnas, no borra datos.
 
